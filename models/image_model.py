@@ -61,6 +61,7 @@ class ImageModel:
         self._cache = OrderedDict()
         self._cache_max_size = 10
         self._cache_max_memory_mb = 50
+        self._cache_current_memory = 0
         
         self._processing = False
         
@@ -99,6 +100,9 @@ class ImageModel:
     
     def _cleanup_history_by_memory(self):
         """Remove oldest history items if memory limit exceeded"""
+        if not self.history_sizes:
+            return
+            
         total_memory = sum(self.history_sizes) / (1024 * 1024)  # Convert to MB
         
         while total_memory > self.MAX_HISTORY_MEMORY_MB and len(self.history_data) > 1:
@@ -119,17 +123,25 @@ class ImageModel:
 
     def validate_image_format(self, filepath: str) -> bool:
         """Validate that file is a supported image format"""
-        import imghdr
-        
-        # Check by extension
-        valid_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext not in valid_extensions:
-            return False
-        
-        # Check by magic numbers
-        image_type = imghdr.what(filepath)
-        return image_type is not None
+        try:
+            import imghdr
+            
+            # Check by extension
+            valid_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext not in valid_extensions:
+                return False
+            
+            # Check by magic numbers
+            image_type = imghdr.what(filepath)
+            return image_type is not None
+        except:
+            # If imghdr fails, try opening with PIL
+            try:
+                Image.open(filepath).verify()
+                return True
+            except:
+                return False
     
     def _add_to_history(self):
         """Add current state to history with compression"""
@@ -170,8 +182,6 @@ class ImageModel:
             except Exception as e:
                 print(f"Warning: Failed to add to history: {e}")
 
-    
-
     def save_image(self, filepath: str, format: str = None, quality: int = 95) -> bool:
         """Save the current image with error handling and validation"""
         try:
@@ -184,9 +194,8 @@ class ImageModel:
                 format = 'PNG'  # Default to PNG
                 warnings.warn(f"Invalid format specified, using PNG")
             
-            # Check if file exists and ask for confirmation
+            # Check if file exists and ask for confirmation (handled by UI)
             if os.path.exists(filepath):
-                # This should be handled by UI, but we'll warn
                 warnings.warn(f"File already exists: {filepath}")
             
             # Ensure directory exists (skip if filepath has no directory)
@@ -354,6 +363,7 @@ class ImageModel:
     def _sync_image_data_from_current(self):
         """Update image_data dimensions from current_image after undo/redo."""
         if self.image_data and self.current_image:
+            # Create new ImageData with updated dimensions but keep other fields
             self.image_data = ImageData(
                 path=self.image_data.path,
                 name=self.image_data.name,
@@ -389,13 +399,30 @@ class ImageModel:
         return None
     
     def _set_cache(self, key: str, value):
-        """Set item in cache with LRU eviction"""
+        """Set item in cache with LRU eviction and memory management"""
+        # Estimate size
+        if isinstance(value, np.ndarray):
+            item_size = value.nbytes
+        else:
+            item_size = 1024 * 1024  # Default 1MB estimate
+        
+        # Check if we need to make space
+        while self._cache_current_memory + item_size > self._cache_max_memory_mb * 1024 * 1024 and self._cache:
+            # Remove oldest item
+            oldest_key, oldest_value = self._cache.popitem(last=False)
+            if isinstance(oldest_value, np.ndarray):
+                self._cache_current_memory -= oldest_value.nbytes
+        
+        # Add to cache
         self._cache[key] = value
         self._cache.move_to_end(key)
+        self._cache_current_memory += item_size
         
-        # Check memory limit
+        # Limit by count as well
         if len(self._cache) > self._cache_max_size:
-            self._cache.popitem(last=False)
+            oldest_key, oldest_value = self._cache.popitem(last=False)
+            if isinstance(oldest_value, np.ndarray):
+                self._cache_current_memory -= oldest_value.nbytes
     
     def get_cv2_image_cached(self) -> Optional[np.ndarray]:
         """Get CV2 image with caching"""
@@ -411,10 +438,12 @@ class ImageModel:
         # Convert and cache
         try:
             open_cv_image = np.array(self.current_image)
-            if open_cv_image.shape[-1] == 4:  # RGBA
+            if len(open_cv_image.shape) == 3 and open_cv_image.shape[-1] == 4:  # RGBA
                 open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGBA2BGRA)
-            else:  # RGB
+            elif len(open_cv_image.shape) == 3:  # RGB
                 open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
+            elif len(open_cv_image.shape) == 2:  # Grayscale
+                open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_GRAY2BGR)
             
             self._set_cache(cache_key, open_cv_image.copy())
             return open_cv_image
@@ -435,14 +464,23 @@ class ImageModel:
                 pil_image = Image.fromarray(
                     cv2.cvtColor(cv2_image, cv2.COLOR_BGRA2RGBA)
                 )
-            else:
+            elif len(cv2_image.shape) == 3:
                 pil_image = Image.fromarray(
                     cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
                 )
+            elif len(cv2_image.shape) == 2:
+                pil_image = Image.fromarray(cv2_image)
+            else:
+                raise ValueError(f"Unexpected image shape: {cv2_image.shape}")
+            
             self._processing = True
             self.current_image = pil_image
             self._cache.clear()
+            self._cache_current_memory = 0
             self._add_to_history()
+        except Exception as e:
+            print(f"Error updating from CV2: {e}")
+            raise
         finally:
             self._processing = False
     
@@ -458,12 +496,11 @@ class ImageModel:
             self.current_image = enhancer.enhance(factor)
             self._add_to_history()
             self._cache.clear()  # Clear cache on image change
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
             raise ImageProcessingError(f"Brightness adjustment failed: {str(e)}")
-    
-    # ... (other adjustment methods remain similar with cache clearing)
     
     def adjust_contrast(self, factor: float):
         """Adjust image contrast"""
@@ -476,6 +513,7 @@ class ImageModel:
             self.current_image = enhancer.enhance(factor)
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
@@ -492,6 +530,7 @@ class ImageModel:
             self.current_image = enhancer.enhance(factor)
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
@@ -508,6 +547,7 @@ class ImageModel:
             self.current_image = enhancer.enhance(factor)
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
@@ -516,14 +556,17 @@ class ImageModel:
     def apply_blur(self, radius: float = 2):
         """Apply Gaussian blur"""
         try:
-            if self.current_image:
-                self._processing = True
-                self.current_image = self.current_image.filter(
-                    ImageFilter.GaussianBlur(radius=radius)
-                )
-                self._add_to_history()
-                self._cache.clear()
-                self._processing = False
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            
+            self._processing = True
+            self.current_image = self.current_image.filter(
+                ImageFilter.GaussianBlur(radius=radius)
+            )
+            self._add_to_history()
+            self._cache.clear()
+            self._cache_current_memory = 0
+            self._processing = False
         except Exception as e:
             self._processing = False
             raise ImageProcessingError(f"Blur failed: {str(e)}")
@@ -531,12 +574,15 @@ class ImageModel:
     def rotate(self, angle: float):
         """Rotate image"""
         try:
-            if self.current_image:
-                self._processing = True
-                self.current_image = self.current_image.rotate(angle, expand=True)
-                self._add_to_history()
-                self._cache.clear()
-                self._processing = False
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            
+            self._processing = True
+            self.current_image = self.current_image.rotate(angle, expand=True)
+            self._add_to_history()
+            self._cache.clear()
+            self._cache_current_memory = 0
+            self._processing = False
         except Exception as e:
             self._processing = False
             raise ImageProcessingError(f"Rotation failed: {str(e)}")
@@ -544,12 +590,15 @@ class ImageModel:
     def crop(self, box: Tuple[int, int, int, int]):
         """Crop image (left, top, right, bottom)"""
         try:
-            if self.current_image:
-                self._processing = True
-                self.current_image = self.current_image.crop(box)
-                self._add_to_history()
-                self._cache.clear()
-                self._processing = False
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            
+            self._processing = True
+            self.current_image = self.current_image.crop(box)
+            self._add_to_history()
+            self._cache.clear()
+            self._cache_current_memory = 0
+            self._processing = False
         except Exception as e:
             self._processing = False
             raise ImageProcessingError(f"Crop failed: {str(e)}")
@@ -557,14 +606,17 @@ class ImageModel:
     def resize(self, width: int, height: int):
         """Resize image to given dimensions."""
         try:
-            if self.current_image:
-                self._processing = True
-                self.current_image = self.current_image.resize(
-                    (width, height), Image.Resampling.LANCZOS
-                )
-                self._add_to_history()
-                self._cache.clear()
-                self._processing = False
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            
+            self._processing = True
+            self.current_image = self.current_image.resize(
+                (width, height), Image.Resampling.LANCZOS
+            )
+            self._add_to_history()
+            self._cache.clear()
+            self._cache_current_memory = 0
+            self._processing = False
         except Exception as e:
             self._processing = False
             raise ImageProcessingError(f"Resize failed: {str(e)}")
@@ -576,6 +628,7 @@ class ImageModel:
             self.current_image = self.original_image.copy()
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
 
     def apply_edge_enhance(self):
@@ -587,6 +640,7 @@ class ImageModel:
             self.current_image = self.current_image.filter(ImageFilter.EDGE_ENHANCE_MORE)
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
@@ -601,6 +655,7 @@ class ImageModel:
             self.current_image = ImageOps.mirror(self.current_image)
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
@@ -615,7 +670,35 @@ class ImageModel:
             self.current_image = ImageOps.flip(self.current_image)
             self._add_to_history()
             self._cache.clear()
+            self._cache_current_memory = 0
             self._processing = False
         except Exception as e:
             self._processing = False
             raise ImageProcessingError(f"Flip vertical failed: {str(e)}")
+
+    def get_image_info(self) -> dict:
+        """Get comprehensive image information"""
+        if not self.current_image:
+            return {"error": "No image loaded"}
+        
+        info = {
+            "dimensions": f"{self.current_image.width} x {self.current_image.height}",
+            "mode": self.current_image.mode,
+            "format": self.current_image.format or "Unknown",
+            "size_kb": self._get_image_size_bytes(self.current_image) / 1024,
+        }
+        
+        if self.image_data and self.image_data.exif_data:
+            info["exif"] = self.image_data.exif_data
+        
+        return info
+
+    def has_image(self) -> bool:
+        """Check if an image is loaded"""
+        return self.current_image is not None
+
+    def get_current_image_copy(self) -> Optional[Image.Image]:
+        """Get a copy of the current image"""
+        if self.current_image:
+            return self.current_image.copy()
+        return None

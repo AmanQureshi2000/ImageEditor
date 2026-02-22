@@ -1,7 +1,7 @@
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 import numpy as np
-from PIL import ImageQt,Image
+from PIL import ImageQt, Image
 from models.image_model import ImageModel
 from models.ai_model import AIModel
 import io
@@ -29,6 +29,9 @@ class ImageController(QObject):
             if success:
                 self.image_updated.emit()
                 self.status_updated.emit(f"Loaded: {self.image_model.image_data.name}")
+                # Reset layer manager when loading new image
+                self.layer_manager = LayerManager()
+                self.use_layers = False
             else:
                 self.status_updated.emit("Failed to load image")
             return success
@@ -60,19 +63,27 @@ class ImageController(QObject):
             except (AttributeError, TypeError):
                 # Method 2: Alternative conversion (handle RGB and RGBA)
                 img = self.image_model.current_image
-                if img.mode == 'RGBA':
-                    img_data = img.tobytes("raw", "RGBA")
-                    qimage = QImage(img_data, img.width, img.height,
-                                    img.width * 4, QImage.Format_RGBA8888)
-                else:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    img_data = img.tobytes("raw", "RGB")
-                    qimage = QImage(img_data, img.width, img.height,
-                                    img.width * 3, QImage.Format_RGB888)
-                return QPixmap.fromImage(qimage)
+                try:
+                    if img.mode == 'RGBA':
+                        img_data = img.tobytes("raw", "RGBA")
+                        qimage = QImage(img_data, img.width, img.height,
+                                        img.width * 4, QImage.Format_RGBA8888)
+                    else:
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img_data = img.tobytes("raw", "RGB")
+                        qimage = QImage(img_data, img.width, img.height,
+                                        img.width * 3, QImage.Format_RGB888)
+                    return QPixmap.fromImage(qimage)
+                except Exception:
+                    # Method 3: Bytes IO fallback
+                    byte_array = io.BytesIO()
+                    self.image_model.current_image.save(byte_array, format='PNG')
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(byte_array.getvalue())
+                    return pixmap
             except Exception:
-                # Method 3: Bytes IO fallback
+                # Ultimate fallback
                 byte_array = io.BytesIO()
                 self.image_model.current_image.save(byte_array, format='PNG')
                 pixmap = QPixmap()
@@ -183,6 +194,27 @@ class ImageController(QObject):
         except Exception as e:
             self.status_updated.emit(f"Error: {str(e)}")
         
+    def reset_image(self):
+        """Reset to original image"""
+        try:
+            if hasattr(self.image_model, 'reset_to_original'):
+                self.image_model.reset_to_original()
+                self.image_updated.emit()
+                self.status_updated.emit("Reset to original")
+            else:
+                # Fallback method
+                if self.image_model.original_image:
+                    self.image_model.current_image = self.image_model.original_image.copy()
+                    if hasattr(self.image_model, '_cache'):
+                        self.image_model._cache.clear()
+                    self.image_model._add_to_history()
+                    self.image_updated.emit()
+                    self.status_updated.emit("Reset to original")
+        except Exception as e:
+            self.status_updated.emit(f"Error: {str(e)}")
+
+    # ========== AI Methods ==========
+    
     def ai_enhance_resolution(self, scale: int = 2):
         """AI-based resolution enhancement"""
         try:
@@ -302,43 +334,32 @@ class ImageController(QObject):
             self.status_updated.emit(f"Error: {str(e)}")
             self.progress_updated.emit(100)
 
-    def reset_image(self):
-        """Reset to original image"""
-        try:
-            if hasattr(self.image_model, 'reset_to_original'):
-                self.image_model.reset_to_original()
-                self.image_updated.emit()
-                self.status_updated.emit("Reset to original")
-            else:
-                # Fallback method
-                if self.image_model.original_image:
-                    self.image_model.current_image = self.image_model.original_image.copy()
-                    self.image_model._cache.clear()
-                    self.image_model._add_to_history()
-                    self.image_updated.emit()
-                    self.status_updated.emit("Reset to original")
-        except Exception as e:
-            self.status_updated.emit(f"Error: {str(e)}")
-
+    # ========== Layer Methods ==========
+    
     def toggle_layer_mode(self, enabled: bool):
         """Toggle layer mode on/off"""
         self.use_layers = enabled
         if enabled and self.image_model.current_image:
             # Clear any existing layers so we don't stack duplicates when re-enabling
-            self.layer_manager.layers.clear()
-            self.layer_manager.active_layer_index = -1
+            self.layer_manager = LayerManager()  # Reset the layer manager
             # Create base layer from current image
             layer = Layer(self.image_model.current_image, "Background")
             self.layer_manager.add_layer(layer)
             self.status_updated.emit("Layer mode enabled")
+        elif not enabled:
+            self.status_updated.emit("Layer mode disabled")
 
     def add_layer(self, name: str = "New Layer"):
         """Add a new blank layer"""
+        if not self.use_layers:
+            self.status_updated.emit("Please enable layer mode first")
+            return
+            
         if self.image_model.current_image:
             # Create blank layer with same size
             blank = Image.new('RGBA', 
                             (self.image_model.current_image.width,
-                            self.image_model.current_image.height),
+                             self.image_model.current_image.height),
                             (0, 0, 0, 0))
             layer = Layer(blank, name)
             self.layer_manager.add_layer(layer)
@@ -347,6 +368,10 @@ class ImageController(QObject):
 
     def add_image_as_layer(self, image: Image.Image, name: str = "Image Layer"):
         """Add an image as a new layer"""
+        if not self.use_layers:
+            self.status_updated.emit("Please enable layer mode first")
+            return
+            
         layer = Layer(image, name)
         self.layer_manager.add_layer(layer)
         self._update_from_layers()
@@ -354,14 +379,14 @@ class ImageController(QObject):
 
     def remove_layer(self, index: int):
         """Remove a layer"""
-        if self.use_layers:
+        if self.use_layers and 0 <= index < len(self.layer_manager.layers):
             self.layer_manager.remove_layer(index)
             self._update_from_layers()
             self.status_updated.emit("Layer removed")
 
     def duplicate_layer(self, index: int):
         """Duplicate a layer"""
-        if self.use_layers:
+        if self.use_layers and 0 <= index < len(self.layer_manager.layers):
             self.layer_manager.duplicate_layer(index)
             self._update_from_layers()
             self.status_updated.emit("Layer duplicated")
@@ -376,7 +401,7 @@ class ImageController(QObject):
 
     def flatten_layers(self):
         """Flatten all layers"""
-        if self.use_layers:
+        if self.use_layers and len(self.layer_manager.layers) > 1:
             flattened = self.layer_manager.flatten()
             if flattened:
                 # Clear layers and set flattened as current
@@ -385,13 +410,15 @@ class ImageController(QObject):
                 self.layer_manager.add_layer(layer)
                 self.image_model.current_image = flattened
                 self.image_model._add_to_history()
+                if hasattr(self.image_model, '_cache'):
+                    self.image_model._cache.clear()
                 self.image_updated.emit()
                 self.status_updated.emit("Layers flattened")
 
     def set_layer_opacity(self, index: int, opacity: float):
         """Set layer opacity"""
         if self.use_layers and 0 <= index < len(self.layer_manager.layers):
-            self.layer_manager.layers[index].opacity = opacity
+            self.layer_manager.layers[index].opacity = max(0.0, min(1.0, opacity))
             self._update_from_layers()
 
     def set_layer_blend_mode(self, index: int, mode: str):
@@ -410,10 +437,12 @@ class ImageController(QObject):
         """Set layer name"""
         if self.use_layers and 0 <= index < len(self.layer_manager.layers) and name:
             self.layer_manager.layers[index].name = name
+            # No need to update image, just refresh layer panel
+            self.status_updated.emit(f"Layer renamed to: {name}")
 
     def _update_from_layers(self):
         """Update current image from layers"""
-        if self.use_layers:
+        if self.use_layers and hasattr(self, 'layer_manager'):
             flattened = self.layer_manager.flatten()
             if flattened:
                 self.image_model.current_image = flattened
@@ -421,7 +450,7 @@ class ImageController(QObject):
 
     def get_layer_info(self) -> dict:
         """Get information about all layers"""
-        if not self.use_layers:
+        if not self.use_layers or not hasattr(self, 'layer_manager'):
             return None
         
         info = {
@@ -434,61 +463,95 @@ class ImageController(QObject):
         
         for layer in self.layer_manager.layers:
             info['names'].append(layer.name)
-            info['thumbnails'].append(layer.thumbnail)
+            info['thumbnails'].append(layer.thumbnail if hasattr(layer, 'thumbnail') else None)
             info['opacities'].append(layer.opacity)
             info['blend_modes'].append(layer.blend_mode)
             info['visibilities'].append(layer.visible)
         
         return info
     
+    # ========== Advanced Color Methods ==========
     
     def adjust_hue(self, value: int):
         """Adjust image hue"""
         if self.image_model.current_image:
             try:
+                # Set processing flag if available
+                if hasattr(self.image_model, '_processing'):
+                    self.image_model._processing = True
+                
                 img = self.image_model.current_image
                 img_array = np.array(img)
+                
                 if len(img_array.shape) != 3:
                     return
-                # Use RGB portion for HSV (handle RGBA)
-                rgb = img_array[:, :, :3] if img_array.shape[2] == 4 else img_array
+                    
+                # Handle RGBA and RGB separately
+                has_alpha = img_array.shape[2] == 4
+                
+                # Use RGB portion for HSV
+                rgb = img_array[:, :, :3] if has_alpha else img_array
+                
+                # Convert to HSV and adjust hue
                 hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
                 hsv[:, :, 0] = (hsv[:, :, 0] + value) % 180
                 rgb_out = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-                if img_array.shape[2] == 4:
+                
+                # Reconstruct with alpha if needed
+                if has_alpha:
                     out = np.dstack((rgb_out, img_array[:, :, 3]))
                 else:
                     out = rgb_out
-                self.image_model._processing = True
-                self.image_model.current_image = Image.fromarray(out)
+                
+                # Update image
+                self.image_model.current_image = Image.fromarray(out.astype(np.uint8))
                 self.image_model._add_to_history()
-                self.image_model._cache.clear()
-                self.image_model._processing = False
+                
+                # Clear cache if available
+                if hasattr(self.image_model, '_cache'):
+                    self.image_model._cache.clear()
+                
                 self.image_updated.emit()
                 self.status_updated.emit(f"Hue adjusted: {value}")
+                
             except Exception as e:
+                self.status_updated.emit(f"Error adjusting hue: {str(e)}")
+            finally:
                 if hasattr(self.image_model, '_processing'):
                     self.image_model._processing = False
-                self.status_updated.emit(f"Error adjusting hue: {str(e)}")
 
     def adjust_gamma(self, value: float):
         """Adjust image gamma"""
         if self.image_model.current_image:
             try:
+                # Set processing flag if available
+                if hasattr(self.image_model, '_processing'):
+                    self.image_model._processing = True
+                
                 img = self.image_model.current_image
                 img_array = np.array(img).astype(np.float32) / 255.0
+                
+                # Ensure gamma is valid
                 if value <= 0:
                     value = 1.0
+                    
+                # Apply gamma correction
                 gamma_corrected = np.power(img_array, 1.0 / value)
                 gamma_corrected = (np.clip(gamma_corrected, 0, 1) * 255).astype(np.uint8)
-                self.image_model._processing = True
+                
+                # Update image
                 self.image_model.current_image = Image.fromarray(gamma_corrected)
                 self.image_model._add_to_history()
-                self.image_model._cache.clear()
-                self.image_model._processing = False
+                
+                # Clear cache if available
+                if hasattr(self.image_model, '_cache'):
+                    self.image_model._cache.clear()
+                
                 self.image_updated.emit()
                 self.status_updated.emit(f"Gamma adjusted: {value:.2f}")
+                
             except Exception as e:
+                self.status_updated.emit(f"Error adjusting gamma: {str(e)}")
+            finally:
                 if hasattr(self.image_model, '_processing'):
                     self.image_model._processing = False
-                self.status_updated.emit(f"Error adjusting gamma: {str(e)}")

@@ -1,11 +1,79 @@
-# Core requirements with compatible versions
-PyQt5>=5.15.0
-Pillow>=9.0.0
-numpy==1.24.3  # Pin to NumPy 1.x for OpenCV compatibility
-opencv-python==4.8.1.78  # Specific version known to work
-scikit-image==0.21.0  # Compatible with NumPy 1.24
+# =============================================================================
+# AI Image Editor - Complete Requirements File
+# =============================================================================
+# This file contains all dependencies needed for the AI Image Editor application.
+# Version: 4.0 (2026 Edition)
+# =============================================================================
 
-# Optional AI libraries (comment out if not needed)
-onnxruntime>=1.14.0
-torch>=2.0.0
-torchvision>=0.15.0
+# -----------------------------------------------------------------------------
+# CORE DEPENDENCIES (Required for basic functionality)
+# -----------------------------------------------------------------------------
+
+# GUI Framework
+PyQt5>=5.15.0                # Qt5 bindings for Python - core UI framework
+
+# Image Processing
+Pillow>=10.1.0                # PIL fork - image loading, saving, basic operations
+numpy==1.24.3                  # NumPy 1.x (required for OpenCV compatibility)
+opencv-python==4.8.1.78        # OpenCV - computer vision, filters, AI operations
+scikit-image>=0.21.0           # Advanced image processing algorithms
+
+# System Utilities
+psutil>=5.8.0                  # System monitoring - memory usage tracking
+
+# -----------------------------------------------------------------------------
+# AI & MACHINE LEARNING (Optional - for advanced features)
+# -----------------------------------------------------------------------------
+# Uncomment these if you want the full AI capabilities
+
+# ONNX Runtime - for running optimized AI models
+onnxruntime>=1.14.0           # Cross-platform inference engine
+onnxruntime-directml>=1.14.0  # Windows DirectML acceleration (optional)
+
+# PyTorch - for deep learning models (choose one based on your system)
+torch>=2.0.0                   # CPU version
+# torch>=2.0.0 --index-url https://download.pytorch.org/whl/cu118  # CUDA 11.8 GPU version
+torchvision>=0.15.0             # TorchVision - computer vision models
+
+# Transformers - for advanced AI models (optional)
+# transformers>=4.30.0            # Hugging Face transformers
+
+# -----------------------------------------------------------------------------
+# DEVELOPMENT & BUILD TOOLS (Optional - for developers)
+# -----------------------------------------------------------------------------
+
+# Packaging
+pyinstaller>=5.13.0            # Create standalone executables
+auto-py-to-exe>=2.42.0         # GUI for PyInstaller
+
+# Testing
+pytest>=7.4.0                   # Unit testing framework
+pytest-qt>=4.2.0                # Qt testing support
+
+# Code Quality
+black>=23.0.0                   # Code formatter
+pylint>=2.17.0                  # Code linter
+mypy>=1.0.0                     # Static type checking
+
+# -----------------------------------------------------------------------------
+# INSTALLATION INSTRUCTIONS
+# -----------------------------------------------------------------------------
+# 
+# Basic installation (core features only):
+#   pip install -r requirements.txt
+#
+# Full installation (with AI features):
+#   pip install -r requirements.txt
+#   pip install onnxruntime torch torchvision
+#
+# For GPU acceleration (NVIDIA):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   pip install onnxruntime-gpu
+#
+# For developers:
+#   pip install -r requirements-dev.txt  (see below)
+# -----------------------------------------------------------------------------
+
+# =============================================================================
+# END OF REQUIREMENTS
+# =============================================================================

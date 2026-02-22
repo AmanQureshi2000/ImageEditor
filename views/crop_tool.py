@@ -1,6 +1,6 @@
-from PyQt5.QtWidgets import QWidget, QRubberBand, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSpinBox
-from PyQt5.QtCore import Qt, QRect, QPoint, pyqtSignal
-from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap
+from PyQt5.QtWidgets import QWidget, QRubberBand, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSpinBox, QApplication
+from PyQt5.QtCore import Qt, QRect, QPoint, pyqtSignal, QEvent
+from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QCursor
 
 class CropTool(QWidget):
     """Visual crop tool with rubber band selection"""
@@ -11,7 +11,7 @@ class CropTool(QWidget):
     def __init__(self, pixmap: QPixmap, parent=None):
         super().__init__(parent)
         self.original_pixmap = pixmap
-        self.pixmap = pixmap.copy()
+        self.pixmap = pixmap.copy() if not pixmap.isNull() else QPixmap()
         self.setWindowTitle("Crop Image")
         self.setGeometry(100, 100, 800, 600)
         
@@ -23,34 +23,47 @@ class CropTool(QWidget):
         self.resizing = False
         self.resize_handle = None
         self.handle_size = 8
+        self.drag_start = QPoint()
+        self.initial_rect = QRect()
+        self.image_rect = QRect()  # Initialize image_rect
         
         self.init_ui()
         
     def init_ui(self):
         """Initialize crop tool UI"""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
         
         # Toolbar
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(5)
         
         # Aspect ratio controls
         toolbar.addWidget(QLabel("Aspect Ratio:"))
         
         self.free_btn = QPushButton("Free")
+        self.free_btn.setObjectName("primary_btn")
         self.free_btn.clicked.connect(lambda: self.set_aspect_ratio(None))
-        self.free_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.free_btn.setFixedHeight(30)
         toolbar.addWidget(self.free_btn)
         
         self.square_btn = QPushButton("1:1")
+        self.square_btn.setObjectName("")
         self.square_btn.clicked.connect(lambda: self.set_aspect_ratio((1, 1)))
+        self.square_btn.setFixedHeight(30)
         toolbar.addWidget(self.square_btn)
         
         self.ratio_4_3_btn = QPushButton("4:3")
+        self.ratio_4_3_btn.setObjectName("")
         self.ratio_4_3_btn.clicked.connect(lambda: self.set_aspect_ratio((4, 3)))
+        self.ratio_4_3_btn.setFixedHeight(30)
         toolbar.addWidget(self.ratio_4_3_btn)
         
         self.ratio_16_9_btn = QPushButton("16:9")
+        self.ratio_16_9_btn.setObjectName("")
         self.ratio_16_9_btn.clicked.connect(lambda: self.set_aspect_ratio((16, 9)))
+        self.ratio_16_9_btn.setFixedHeight(30)
         toolbar.addWidget(self.ratio_16_9_btn)
         
         toolbar.addStretch()
@@ -60,6 +73,7 @@ class CropTool(QWidget):
         self.ratio_w = QSpinBox()
         self.ratio_w.setRange(1, 100)
         self.ratio_w.setValue(2)
+        self.ratio_w.setFixedWidth(60)
         toolbar.addWidget(self.ratio_w)
         
         toolbar.addWidget(QLabel(":"))
@@ -67,42 +81,62 @@ class CropTool(QWidget):
         self.ratio_h = QSpinBox()
         self.ratio_h.setRange(1, 100)
         self.ratio_h.setValue(3)
+        self.ratio_h.setFixedWidth(60)
         toolbar.addWidget(self.ratio_h)
         
         self.set_custom_btn = QPushButton("Set")
+        self.set_custom_btn.setObjectName("")
         self.set_custom_btn.clicked.connect(self.set_custom_aspect_ratio)
+        self.set_custom_btn.setFixedHeight(30)
         toolbar.addWidget(self.set_custom_btn)
         
         layout.addLayout(toolbar)
         
         # Action buttons
         action_bar = QHBoxLayout()
+        action_bar.setSpacing(5)
         
         self.crop_btn = QPushButton("Crop")
+        self.crop_btn.setObjectName("primary_btn")
         self.crop_btn.clicked.connect(self.apply_crop)
         self.crop_btn.setEnabled(False)
-        self.crop_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px;")
+        self.crop_btn.setFixedHeight(30)
         action_bar.addWidget(self.crop_btn)
-        
+
         self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("danger_btn")
         self.cancel_btn.clicked.connect(self.cancel_crop)
-        self.cancel_btn.setStyleSheet("background-color: #f44336; color: white; padding: 5px;")
+        self.cancel_btn.setFixedHeight(30)
         action_bar.addWidget(self.cancel_btn)
         
         action_bar.addStretch()
         
         # Selection info
         self.info_label = QLabel("Click and drag to select crop area")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setFixedHeight(25)
         action_bar.addWidget(self.info_label)
         
         layout.addLayout(action_bar)
+        
+        # Add stretch to push everything to the top
+        layout.addStretch()
         
         # Set minimum size
         self.setMinimumSize(400, 300)
         
     def paintEvent(self, event):
         """Custom paint event for crop overlay"""
+        if self.pixmap.isNull():
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(40, 40, 40))
+            painter.setPen(Qt.white)
+            painter.drawText(self.rect(), Qt.AlignCenter, "No image to crop")
+            return
+            
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setRenderHint(QPainter.Antialiasing)
         
         # Draw the image centered
         if not self.pixmap.isNull():
@@ -152,11 +186,10 @@ class CropTool(QWidget):
                 aspect = crop_w / crop_h if crop_h > 0 else 0
                 self.info_label.setText(f"Selection: {crop_w} x {crop_h} (Aspect: {aspect:.2f})")
             else:
+                # Darken the whole image
                 painter.drawRect(self.image_rect)
                 self.info_label.setText("Click and drag to select crop area")
-        else:
-            painter.fillRect(self.rect(), Qt.black)
-            
+    
     def _draw_handles(self, painter, rect):
         """Draw resize handles on selection rectangle"""
         handle_positions = [
@@ -176,24 +209,28 @@ class CropTool(QWidget):
     
     def mousePressEvent(self, event):
         """Handle mouse press for starting selection"""
-        if event.button() == Qt.LeftButton and self.image_rect.contains(event.pos()):
-            # Check if clicking on a resize handle
-            if self.selection_rect and self.selection_rect.isValid():
-                handle = self._get_handle_at_pos(event.pos())
-                if handle:
-                    self.resizing = True
-                    self.resize_handle = handle
-                    self.drag_start = event.pos()
-                    self.initial_rect = QRect(self.selection_rect)
-                    return
-            
-            # Start new selection
-            self.origin = event.pos()
-            if not self.rubber_band:
-                self.rubber_band = QRubberBand(QRubberBand.Rectangle, self)
-            self.rubber_band.setGeometry(QRect(self.origin, self.origin))
-            self.rubber_band.show()
-            self.dragging = True
+        if event.button() == Qt.LeftButton and self.image_rect.isValid():
+            # Check if click is within image area
+            if self.image_rect.contains(event.pos()):
+                # Check if clicking on a resize handle
+                if self.selection_rect and self.selection_rect.isValid():
+                    handle = self._get_handle_at_pos(event.pos())
+                    if handle:
+                        self.resizing = True
+                        self.resize_handle = handle
+                        self.drag_start = event.pos()
+                        self.initial_rect = QRect(self.selection_rect)
+                        self.setCursor(Qt.ClosedHandCursor)
+                        return
+                
+                # Start new selection
+                self.origin = event.pos()
+                if not self.rubber_band:
+                    self.rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+                self.rubber_band.setGeometry(QRect(self.origin, self.origin))
+                self.rubber_band.show()
+                self.dragging = True
+                self.setCursor(Qt.CrossCursor)
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for selection/resize"""
@@ -260,10 +297,12 @@ class CropTool(QWidget):
             self.resizing = False
             self.resize_handle = None
             self.update()
+        
+        self.setCursor(Qt.ArrowCursor)
     
     def _get_handle_at_pos(self, pos):
         """Get resize handle at position"""
-        if not self.selection_rect:
+        if not self.selection_rect or not self.selection_rect.isValid():
             return None
         
         rect = self.selection_rect
@@ -296,13 +335,18 @@ class CropTool(QWidget):
                 self.setCursor(Qt.SizeVerCursor)
             elif handle in ['left', 'right']:
                 self.setCursor(Qt.SizeHorCursor)
-        else:
+        elif self.image_rect.contains(pos):
             self.setCursor(Qt.CrossCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
     
     def _apply_aspect_ratio(self, rect):
         """Apply aspect ratio constraint to rectangle"""
         if not self.aspect_ratio:
             return rect
+        
+        # Ensure positive dimensions
+        rect = rect.normalized()
         
         target_ratio = self.aspect_ratio[0] / self.aspect_ratio[1]
         current_ratio = rect.width() / rect.height() if rect.height() > 0 else 0
@@ -310,12 +354,12 @@ class CropTool(QWidget):
         if abs(current_ratio - target_ratio) > 0.01:
             if current_ratio > target_ratio:
                 # Too wide, adjust height
-                new_height = rect.width() / target_ratio
-                rect.setHeight(int(new_height))
+                new_height = int(rect.width() / target_ratio)
+                rect.setHeight(new_height)
             else:
                 # Too tall, adjust width
-                new_width = rect.height() * target_ratio
-                rect.setWidth(int(new_width))
+                new_width = int(rect.height() * target_ratio)
+                rect.setWidth(new_width)
         
         return rect
     
@@ -323,21 +367,22 @@ class CropTool(QWidget):
         """Set fixed aspect ratio for cropping"""
         self.aspect_ratio = ratio
         
-        # Update button styles
-        for btn in [self.free_btn, self.square_btn, self.ratio_4_3_btn, self.ratio_16_9_btn]:
-            btn.setStyleSheet("")
+        # Update primary state (active = primary_btn objectName for selected ratio)
+        self.free_btn.setObjectName("primary_btn" if ratio is None else "")
+        self.square_btn.setObjectName("primary_btn" if ratio == (1, 1) else "")
+        self.ratio_4_3_btn.setObjectName("primary_btn" if ratio == (4, 3) else "")
+        self.ratio_16_9_btn.setObjectName("primary_btn" if ratio == (16, 9) else "")
         
-        if ratio is None:
-            self.free_btn.setStyleSheet("background-color: #4CAF50; color: white;")
-        elif ratio == (1, 1):
-            self.square_btn.setStyleSheet("background-color: #4CAF50; color: white;")
-        elif ratio == (4, 3):
-            self.ratio_4_3_btn.setStyleSheet("background-color: #4CAF50; color: white;")
-        elif ratio == (16, 9):
-            self.ratio_16_9_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        # Re-apply style by refreshing
+        app = QApplication.instance()
+        if app:
+            for btn in [self.free_btn, self.square_btn, self.ratio_4_3_btn, self.ratio_16_9_btn]:
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
         
         # Update current selection if exists
-        if self.selection_rect and self.aspect_ratio:
+        if self.selection_rect and self.selection_rect.isValid() and self.aspect_ratio:
             self.selection_rect = self._apply_aspect_ratio(self.selection_rect)
             self.update()
     
@@ -349,7 +394,7 @@ class CropTool(QWidget):
     
     def apply_crop(self):
         """Apply crop and emit result"""
-        if self.selection_rect and self.selection_rect.isValid():
+        if self.selection_rect and self.selection_rect.isValid() and self.image_rect.isValid():
             # Convert screen coordinates to image coordinates
             scale_x = self.original_pixmap.width() / self.image_rect.width()
             scale_y = self.original_pixmap.height() / self.image_rect.height()
@@ -359,11 +404,33 @@ class CropTool(QWidget):
             image_w = int(self.selection_rect.width() * scale_x)
             image_h = int(self.selection_rect.height() * scale_y)
             
-            crop_rect = QRect(image_x, image_y, image_w, image_h)
-            self.crop_completed.emit(crop_rect)
-            self.close()
+            # Ensure crop rectangle is within image bounds
+            image_x = max(0, min(image_x, self.original_pixmap.width()))
+            image_y = max(0, min(image_y, self.original_pixmap.height()))
+            image_w = min(image_w, self.original_pixmap.width() - image_x)
+            image_h = min(image_h, self.original_pixmap.height() - image_y)
+            
+            if image_w > 0 and image_h > 0:
+                crop_rect = QRect(image_x, image_y, image_w, image_h)
+                self.crop_completed.emit(crop_rect)
+                self.close()
     
     def cancel_crop(self):
         """Cancel cropping"""
         self.crop_cancelled.emit()
         self.close()
+    
+    def resizeEvent(self, event):
+        """Handle resize event"""
+        self.update()
+        super().resizeEvent(event)
+    
+    def keyPressEvent(self, event):
+        """Handle key press events"""
+        if event.key() == Qt.Key_Escape:
+            self.cancel_crop()
+        elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            if self.crop_btn.isEnabled():
+                self.apply_crop()
+        else:
+            super().keyPressEvent(event)

@@ -13,11 +13,26 @@ class AIModel:
         self.lazy_loader = LazyLoader()
         self.cache = ImageCache()
         
-        # Lazy-loaded models
-        self._torch = LazyModel('torch', self.lazy_loader, lambda m: m)
-        self._torchvision = LazyModel('torchvision', self.lazy_loader, lambda m: m)
-        self._onnx = LazyModel('onnxruntime', self.lazy_loader, lambda m: m)
-        self._skimage = LazyModel('skimage', self.lazy_loader, lambda m: m)
+        # Lazy-loaded models (with error handling)
+        try:
+            self._torch = LazyModel('torch', self.lazy_loader, lambda m: m)
+        except:
+            self._torch = None
+            
+        try:
+            self._torchvision = LazyModel('torchvision', self.lazy_loader, lambda m: m)
+        except:
+            self._torchvision = None
+            
+        try:
+            self._onnx = LazyModel('onnxruntime', self.lazy_loader, lambda m: m)
+        except:
+            self._onnx = None
+            
+        try:
+            self._skimage = LazyModel('skimage', self.lazy_loader, lambda m: m)
+        except:
+            self._skimage = None
         
         print("AI Model initialized with lazy loading!")
         
@@ -34,28 +49,33 @@ class AIModel:
         if image.dtype != np.uint8:
             image = cv2.convertScaleAbs(image)
         
-        # Convert grayscale to BGR if needed
+        # Handle different image formats
         if len(image.shape) == 2:
+            # Grayscale
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        elif image.shape[2] == 4:  # RGBA
-            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-        elif image.shape[2] == 3:  # RGB
-            # Assume it's BGR already (from get_cv2_image)
-            pass
+        elif len(image.shape) == 3:
+            if image.shape[2] == 4:  # RGBA
+                image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+            elif image.shape[2] == 3:  # RGB/BGR
+                # Assume it's BGR already (from get_cv2_image)
+                pass
+        else:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
             
         return image
         
     def enhance_resolution(self, image: np.ndarray, scale: int = 2) -> np.ndarray:
         """Enhance image resolution using advanced interpolation"""
-        # Generate cache key
-        image_id = id(image)
-        cache_key = f"enhance_resolution_{image_id}_{scale}"
-        
-        # Check cache
-        cached = self.cache.get_processed(image_id, 'enhance_resolution', {'scale': scale})
-        if cached is not None:
-            return cached
         try:
+            # Generate cache key using hash instead of id (id can be reused)
+            image_hash = hash(image.tobytes()) if image is not None else 0
+            cache_key = f"enhance_resolution_{image_hash}_{scale}"
+            
+            # Check cache
+            cached = self.cache.get_processed(image_hash, 'enhance_resolution', {'scale': scale})
+            if cached is not None:
+                return cached
+            
             image = self._validate_and_prepare_image(image)
             
             height, width = image.shape[:2]
@@ -78,7 +98,9 @@ class AIModel:
                               [-1, 9,-1],
                               [-1,-1,-1]])
             enhanced = cv2.filter2D(enhanced, -1, kernel)
-            self.cache.cache_processed(image_id, 'enhance_resolution', {'scale': scale}, enhanced)
+            
+            # Cache result
+            self.cache.cache_processed(image_hash, 'enhance_resolution', {'scale': scale}, enhanced)
             return enhanced
             
         except Exception as e:
@@ -86,14 +108,14 @@ class AIModel:
         
     def denoise_image(self, image: np.ndarray, strength: float = 0.1) -> np.ndarray:
         """Remove noise from image using advanced denoising"""
-        image_id = id(image)
-        cache_key = f"denoise_{image_id}_{strength}"
-        
-        # Check cache
-        cached = self.cache.get_processed(image_id, 'denoise', {'strength': strength})
-        if cached is not None:
-            return cached
         try:
+            image_hash = hash(image.tobytes()) if image is not None else 0
+            
+            # Check cache
+            cached = self.cache.get_processed(image_hash, 'denoise', {'strength': strength})
+            if cached is not None:
+                return cached
+                
             image = self._validate_and_prepare_image(image)
             
             # Convert strength to appropriate parameters
@@ -105,7 +127,7 @@ class AIModel:
                 image, None, h, h_color, 7, 21
             )
 
-            self.cache.cache_processed(image_id, 'denoise', {'strength': strength}, denoised)
+            self.cache.cache_processed(image_hash, 'denoise', {'strength': strength}, denoised)
                 
             return denoised
             
@@ -115,11 +137,14 @@ class AIModel:
     def colorize_image(self, image: np.ndarray) -> np.ndarray:
         """Colorize black and white image"""
         try:
+            if image is None:
+                raise ValueError("No image provided")
+                
             if len(image.shape) == 2:
                 gray = image
-            elif image.shape[2] == 1:
+            elif len(image.shape) == 3 and image.shape[2] == 1:
                 gray = image[:, :, 0]
-            elif image.shape[2] == 3:
+            elif len(image.shape) == 3 and image.shape[2] == 3:
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             else:
                 return image
@@ -138,7 +163,7 @@ class AIModel:
     def remove_background(self, image: np.ndarray) -> np.ndarray:
         """Remove background from image using GrabCut algorithm"""
         # Check if we can use the real model (lazy loaded)
-        if self._onnx.is_available():
+        if self._onnx is not None and hasattr(self._onnx, 'is_available') and self._onnx.is_available():
             try:
                 return self._real_background_removal(image)
             except:
@@ -155,48 +180,50 @@ class AIModel:
     
     def _fallback_background_removal(self, image: np.ndarray) -> np.ndarray:
         """Fallback background removal using GrabCut"""
-        # Ensure image is 8UC3 for grabCut
-        if len(image.shape) != 3 or image.shape[2] != 3:
-            image = self._validate_and_prepare_image(image)
-        
-        # Create a copy for processing
-        img_copy = image.copy()
-        
-        mask = np.zeros(img_copy.shape[:2], np.uint8)
-        bgd_model = np.zeros((1, 65), np.float64)
-        fgd_model = np.zeros((1, 65), np.float64)
-        
-        # Create initial rectangle (assume object is centered)
-        height, width = img_copy.shape[:2]
-        rect = (int(width*0.1), int(height*0.1), 
-                int(width*0.8), int(height*0.8))
-        
-        # Apply GrabCut
-        cv2.grabCut(img_copy, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
-        
-        # Create mask where 0 and 2 are background, 1 and 3 are foreground
-        mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
-        
-        # Apply mask to image
-        result = img_copy * mask2[:, :, np.newaxis]
-        
-        # Add alpha channel for transparency
-        bgra = cv2.cvtColor(result, cv2.COLOR_BGR2BGRA)
-        bgra[:, :, 3] = mask2 * 255
-        return bgra
+        try:
+            # Ensure image is 8UC3 for grabCut
+            if len(image.shape) != 3 or image.shape[2] != 3:
+                image = self._validate_and_prepare_image(image)
+            
+            # Create a copy for processing
+            img_copy = image.copy()
+            
+            mask = np.zeros(img_copy.shape[:2], np.uint8)
+            bgd_model = np.zeros((1, 65), np.float64)
+            fgd_model = np.zeros((1, 65), np.float64)
+            
+            # Create initial rectangle (assume object is centered)
+            height, width = img_copy.shape[:2]
+            rect = (int(width*0.1), int(height*0.1), 
+                    int(width*0.8), int(height*0.8))
+            
+            # Apply GrabCut
+            cv2.grabCut(img_copy, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+            
+            # Create mask where 0 and 2 are background, 1 and 3 are foreground
+            mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+            
+            # Apply mask to image
+            result = img_copy * mask2[:, :, np.newaxis]
+            
+            # Add alpha channel for transparency
+            bgra = cv2.cvtColor(result, cv2.COLOR_BGR2BGRA)
+            bgra[:, :, 3] = mask2 * 255
+            return bgra
+            
+        except Exception as e:
+            raise RuntimeError(f"Background removal failed: {str(e)}")
     
     def style_transfer(self, image: np.ndarray, style: str) -> np.ndarray:
         """Apply artistic style transfer using OpenCV filters"""
-        # Generate cache key
-        image_id = id(image)
-        cache_key = f"style_{image_id}_{style}"
-        
-        # Check cache
-        cached = self.cache.get_processed(image_id, 'style', {'style': style})
-        if cached is not None:
-            return cached
-        
         try:
+            image_hash = hash(image.tobytes()) if image is not None else 0
+            
+            # Check cache
+            cached = self.cache.get_processed(image_hash, 'style', {'style': style})
+            if cached is not None:
+                return cached
+            
             image = self._validate_and_prepare_image(image)
             
             styles = {
@@ -212,14 +239,13 @@ class AIModel:
             if style_key in styles:
                 result = styles[style_key](image)
                 # Cache result
-                self.cache.cache_processed(image_id, 'style', {'style': style}, result)
+                self.cache.cache_processed(image_hash, 'style', {'style': style}, result)
                 return result
             return image
             
         except Exception as e:
             raise RuntimeError(f"Style transfer failed: {str(e)}")
 
-        
     def enhance_facial_features(self, image: np.ndarray) -> np.ndarray:
         """Enhance facial features using advanced filters"""
         try:
@@ -229,6 +255,11 @@ class AIModel:
             face_cascade = cv2.CascadeClassifier(
                 cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
             )
+            
+            # Check if cascade loaded successfully
+            if face_cascade.empty():
+                warnings.warn("Face cascade not loaded. Returning original image.")
+                return image
             
             # Convert to grayscale for face detection
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -279,126 +310,144 @@ class AIModel:
         
     def _cartoon_style(self, image: np.ndarray) -> np.ndarray:
         """Apply cartoon effect"""
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply median blur to reduce noise
-        gray = cv2.medianBlur(gray, 5)
-        
-        # Detect edges using adaptive threshold
-        edges = cv2.adaptiveThreshold(gray, 255, 
-                                     cv2.ADAPTIVE_THRESH_MEAN_C,
-                                     cv2.THRESH_BINARY, 9, 9)
-        
-        # Apply bilateral filter for color quantization
-        color = cv2.bilateralFilter(image, 9, 300, 300)
-        
-        # Combine edges with color
-        cartoon = cv2.bitwise_and(color, color, mask=edges)
-        
-        return cartoon
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Apply median blur to reduce noise
+            gray = cv2.medianBlur(gray, 5)
+            
+            # Detect edges using adaptive threshold
+            edges = cv2.adaptiveThreshold(gray, 255, 
+                                         cv2.ADAPTIVE_THRESH_MEAN_C,
+                                         cv2.THRESH_BINARY, 9, 9)
+            
+            # Apply bilateral filter for color quantization
+            color = cv2.bilateralFilter(image, 9, 300, 300)
+            
+            # Combine edges with color
+            cartoon = cv2.bitwise_and(color, color, mask=edges)
+            
+            return cartoon
+        except Exception as e:
+            raise RuntimeError(f"Cartoon style failed: {str(e)}")
         
     def _pencil_style(self, image: np.ndarray) -> np.ndarray:
         """Apply pencil sketch effect"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Invert image
-        inverted = cv2.bitwise_not(gray)
-        
-        # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(inverted, (21, 21), 0)
-        
-        # Invert blurred image
-        inverted_blurred = cv2.bitwise_not(blurred)
-        
-        # Create sketch
-        sketch = cv2.divide(gray, inverted_blurred, scale=256.0)
-        
-        # Convert back to BGR
-        return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Invert image
+            inverted = cv2.bitwise_not(gray)
+            
+            # Apply Gaussian blur
+            blurred = cv2.GaussianBlur(inverted, (21, 21), 0)
+            
+            # Invert blurred image
+            inverted_blurred = cv2.bitwise_not(blurred)
+            
+            # Create sketch
+            sketch = cv2.divide(gray, inverted_blurred, scale=256.0)
+            
+            # Convert back to BGR
+            return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
+        except Exception as e:
+            raise RuntimeError(f"Pencil style failed: {str(e)}")
         
     def _oil_painting_style(self, image: np.ndarray) -> np.ndarray:
         """Apply oil painting effect"""
-        # Ensure image is 8UC3
-        if image.dtype != np.uint8 or len(image.shape) != 3 or image.shape[2] != 3:
-            image = self._validate_and_prepare_image(image)
+        try:
+            # Ensure image is 8UC3
+            if image.dtype != np.uint8 or len(image.shape) != 3 or image.shape[2] != 3:
+                image = self._validate_and_prepare_image(image)
+                
+            # Apply bilateral filter for stylization
+            oil_effect = cv2.bilateralFilter(image, 9, 150, 150)
             
-        # Apply bilateral filter for stylization
-        oil_effect = cv2.bilateralFilter(image, 9, 150, 150)
-        
-        # Add texture
-        kernel = np.ones((2,2), np.uint8)
-        oil_effect = cv2.erode(oil_effect, kernel, iterations=1)
-        oil_effect = cv2.dilate(oil_effect, kernel, iterations=1)
-        
-        return oil_effect
+            # Add texture
+            kernel = np.ones((2,2), np.uint8)
+            oil_effect = cv2.erode(oil_effect, kernel, iterations=1)
+            oil_effect = cv2.dilate(oil_effect, kernel, iterations=1)
+            
+            return oil_effect
+        except Exception as e:
+            raise RuntimeError(f"Oil painting style failed: {str(e)}")
         
     def _watercolor_style(self, image: np.ndarray) -> np.ndarray:
         """Apply watercolor effect"""
-        # Apply bilateral filter for smoothing
-        watercolor = cv2.bilateralFilter(image, 15, 80, 80)
-        
-        # Apply edge-preserving filter
-        watercolor = cv2.edgePreservingFilter(watercolor, flags=1, sigma_s=60, sigma_r=0.4)
-        
-        return watercolor
+        try:
+            # Apply bilateral filter for smoothing
+            watercolor = cv2.bilateralFilter(image, 15, 80, 80)
+            
+            # Apply edge-preserving filter
+            watercolor = cv2.edgePreservingFilter(watercolor, flags=1, sigma_s=60, sigma_r=0.4)
+            
+            return watercolor
+        except Exception as e:
+            raise RuntimeError(f"Watercolor style failed: {str(e)}")
         
     def _comic_style(self, image: np.ndarray) -> np.ndarray:
         """Apply comic book effect"""
-        # Convert to grayscale and detect edges
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        
-        # Reduce colors
-        z = image.reshape((-1,3))
-        z = np.float32(z)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        k = 8
-        _, label, center = cv2.kmeans(z, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-        center = np.uint8(center)
-        quantized = center[label.flatten()]
-        quantized = quantized.reshape(image.shape)
-        
-        # Combine with edges
-        comic = cv2.addWeighted(quantized, 0.8, edges, 0.2, 0)
-        
-        return comic
+        try:
+            # Convert to grayscale and detect edges
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+            edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            
+            # Reduce colors
+            z = image.reshape((-1,3))
+            z = np.float32(z)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+            k = 8
+            _, label, center = cv2.kmeans(z, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+            center = np.uint8(center)
+            quantized = center[label.flatten()]
+            quantized = quantized.reshape(image.shape)
+            
+            # Combine with edges
+            comic = cv2.addWeighted(quantized, 0.8, edges, 0.2, 0)
+            
+            return comic
+        except Exception as e:
+            raise RuntimeError(f"Comic style failed: {str(e)}")
         
     def _vintage_style(self, image: np.ndarray) -> np.ndarray:
         """Apply vintage/sepia effect"""
-        # Create sepia kernel
-        kernel = np.array([[0.272, 0.534, 0.131],
-                          [0.349, 0.686, 0.168],
-                          [0.393, 0.769, 0.189]])
-        
-        # Apply sepia
-        sepia = cv2.transform(image, kernel)
-        sepia = np.clip(sepia, 0, 255).astype(np.uint8)
-        
-        # Add vignette effect
-        rows, cols = image.shape[:2]
-        kernel_x = cv2.getGaussianKernel(cols, cols/3)
-        kernel_y = cv2.getGaussianKernel(rows, rows/3)
-        kernel = kernel_y * kernel_x.T
-        mask = kernel / kernel.max()
-        vignette = np.zeros_like(sepia)
-        
-        for i in range(3):
-            vignette[:,:,i] = sepia[:,:,i] * mask
+        try:
+            # Create sepia kernel
+            kernel = np.array([[0.272, 0.534, 0.131],
+                              [0.349, 0.686, 0.168],
+                              [0.393, 0.769, 0.189]])
             
-        return vignette
+            # Apply sepia
+            sepia = cv2.transform(image, kernel)
+            sepia = np.clip(sepia, 0, 255).astype(np.uint8)
+            
+            # Add vignette effect
+            rows, cols = image.shape[:2]
+            kernel_x = cv2.getGaussianKernel(cols, int(cols/3))
+            kernel_y = cv2.getGaussianKernel(rows, int(rows/3))
+            kernel = kernel_y * kernel_x.T
+            mask = kernel / kernel.max()
+            vignette = np.zeros_like(sepia)
+            
+            for i in range(3):
+                vignette[:,:,i] = sepia[:,:,i] * mask
+                
+            return vignette
+        except Exception as e:
+            raise RuntimeError(f"Vintage style failed: {str(e)}")
         
     def auto_enhance(self, image: np.ndarray) -> np.ndarray:
         """Automatically enhance image using multiple techniques"""
-        image_id = id(image)
-        cache_key = f"auto_enhance_{image_id}"
-        
-        # Check cache
-        cached = self.cache.get_processed(image_id, 'auto_enhance', {})
-        if cached is not None:
-            return cached
         try:
+            image_hash = hash(image.tobytes()) if image is not None else 0
+            
+            # Check cache
+            cached = self.cache.get_processed(image_hash, 'auto_enhance', {})
+            if cached is not None:
+                return cached
+                
             image = self._validate_and_prepare_image(image)
             result = image.copy()
             
@@ -418,7 +467,9 @@ class AIModel:
             
             # Auto color enhancement
             result = self._enhance_colors(result)
-            self.cache.cache_processed(image_id, 'auto_enhance', {}, result)
+            
+            # Cache result
+            self.cache.cache_processed(image_hash, 'auto_enhance', {}, result)
             return result
             
         except Exception as e:
@@ -426,103 +477,132 @@ class AIModel:
         
     def _auto_white_balance(self, image: np.ndarray) -> np.ndarray:
         """Simple auto white balance using gray world assumption"""
-        result = image.copy().astype(np.float32)
-        
-        # Calculate mean of each channel
-        avg_b = np.mean(result[:, :, 0])
-        avg_g = np.mean(result[:, :, 1])
-        avg_r = np.mean(result[:, :, 2])
-        
-        # Calculate scaling factors
-        avg_gray = (avg_b + avg_g + avg_r) / 3
-        scale_b = avg_gray / avg_b if avg_b > 0 else 1
-        scale_g = avg_gray / avg_g if avg_g > 0 else 1
-        scale_r = avg_gray / avg_r if avg_r > 0 else 1
-        
-        # Apply scaling
-        result[:, :, 0] = np.clip(result[:, :, 0] * scale_b, 0, 255)
-        result[:, :, 1] = np.clip(result[:, :, 1] * scale_g, 0, 255)
-        result[:, :, 2] = np.clip(result[:, :, 2] * scale_r, 0, 255)
-        
-        return result.astype(np.uint8)
+        try:
+            result = image.copy().astype(np.float32)
+            
+            # Calculate mean of each channel
+            avg_b = np.mean(result[:, :, 0])
+            avg_g = np.mean(result[:, :, 1])
+            avg_r = np.mean(result[:, :, 2])
+            
+            # Calculate scaling factors
+            avg_gray = (avg_b + avg_g + avg_r) / 3
+            scale_b = avg_gray / avg_b if avg_b > 0 else 1
+            scale_g = avg_gray / avg_g if avg_g > 0 else 1
+            scale_r = avg_gray / avg_r if avg_r > 0 else 1
+            
+            # Apply scaling
+            result[:, :, 0] = np.clip(result[:, :, 0] * scale_b, 0, 255)
+            result[:, :, 1] = np.clip(result[:, :, 1] * scale_g, 0, 255)
+            result[:, :, 2] = np.clip(result[:, :, 2] * scale_r, 0, 255)
+            
+            return result.astype(np.uint8)
+        except Exception as e:
+            warnings.warn(f"White balance failed: {e}")
+            return image
         
     def _auto_contrast(self, image: np.ndarray) -> np.ndarray:
         """Auto contrast adjustment using CLAHE"""
-        # Convert to LAB color space
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        # Apply CLAHE to L channel
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        l = clahe.apply(l)
-        
-        # Merge channels
-        enhanced_lab = cv2.merge([l, a, b])
-        enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+        try:
+            # Convert to LAB color space
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
             
-        return enhanced
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            l = clahe.apply(l)
+            
+            # Merge channels
+            enhanced_lab = cv2.merge([l, a, b])
+            enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+                
+            return enhanced
+        except Exception as e:
+            warnings.warn(f"Contrast adjustment failed: {e}")
+            return image
         
     def _auto_sharpen(self, image: np.ndarray) -> np.ndarray:
         """Auto sharpening using unsharp mask"""
-        # Create Gaussian blur
-        blurred = cv2.GaussianBlur(image, (0, 0), 3)
-        
-        # Apply unsharp masking
-        sharpened = cv2.addWeighted(image, 1.5, blurred, -0.5, 0)
-        
-        return sharpened
+        try:
+            # Create Gaussian blur
+            blurred = cv2.GaussianBlur(image, (0, 0), 3)
+            
+            # Apply unsharp masking
+            sharpened = cv2.addWeighted(image, 1.5, blurred, -0.5, 0)
+            
+            return sharpened
+        except Exception as e:
+            warnings.warn(f"Sharpening failed: {e}")
+            return image
         
     def _enhance_colors(self, image: np.ndarray) -> np.ndarray:
         """Enhance color saturation and vibrance"""
-        # Convert to HSV
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv)
-        
-        # Increase saturation
-        s = np.clip(s * 1.2, 0, 255).astype(np.uint8)
-        
-        # Merge channels
-        enhanced_hsv = cv2.merge([h, s, v])
-        enhanced = cv2.cvtColor(enhanced_hsv, cv2.COLOR_HSV2BGR)
-        
-        return enhanced
+        try:
+            # Convert to HSV
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            h, s, v = cv2.split(hsv)
+            
+            # Increase saturation
+            s = np.clip(s * 1.2, 0, 255).astype(np.uint8)
+            
+            # Merge channels
+            enhanced_hsv = cv2.merge([h, s, v])
+            enhanced = cv2.cvtColor(enhanced_hsv, cv2.COLOR_HSV2BGR)
+            
+            return enhanced
+        except Exception as e:
+            warnings.warn(f"Color enhancement failed: {e}")
+            return image
         
     def _is_blurry(self, image: np.ndarray, threshold: float = 100.0) -> bool:
         """Check if image is blurry using variance of Laplacian"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        variance = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return variance < threshold
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            variance = cv2.Laplacian(gray, cv2.CV_64F).var()
+            return variance < threshold
+        except:
+            return False
         
     def _has_noise(self, image: np.ndarray, threshold: float = 0.05) -> bool:
         """Simple noise detection"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Calculate local variance
-        mean = cv2.blur(gray, (5, 5))
-        variance = cv2.blur(cv2.pow(gray - mean, 2), (5, 5))
-        
-        # High variance might indicate noise
-        noise_level = np.mean(variance) / 255.0
-        return noise_level > threshold
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Calculate local variance
+            mean = cv2.blur(gray, (5, 5))
+            variance = cv2.blur(cv2.pow(gray.astype(np.float32) - mean.astype(np.float32), 2), (5, 5))
+            
+            # High variance might indicate noise
+            noise_level = np.mean(variance) / 255.0
+            return noise_level > threshold
+        except:
+            return False
         
     def upscale_advanced(self, image: np.ndarray, scale: int = 4) -> np.ndarray:
         """Advanced upscaling using multiple techniques"""
-        image = self._validate_and_prepare_image(image)
-        current = image.copy()
-        
-        # Progressive upscaling for better quality
-        for _ in range(scale // 2):
-            # Double the size
-            h, w = current.shape[:2]
-            current = cv2.resize(current, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+        try:
+            image = self._validate_and_prepare_image(image)
+            current = image.copy()
             
-            # Apply edge enhancement
-            kernel = np.array([[-0.5,-0.5,-0.5],
-                              [-0.5, 5, -0.5],
-                              [-0.5,-0.5,-0.5]])
-            current = cv2.filter2D(current, -1, kernel)
-            
-            # Apply slight denoising
-            current = cv2.fastNlMeansDenoisingColored(current, None, 3, 3, 7, 21)
-            
-        return current
+            # Progressive upscaling for better quality
+            steps = scale // 2
+            if steps < 1:
+                steps = 1
+                
+            for _ in range(steps):
+                # Double the size
+                h, w = current.shape[:2]
+                current = cv2.resize(current, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+                
+                # Apply edge enhancement
+                kernel = np.array([[-0.5,-0.5,-0.5],
+                                  [-0.5, 5, -0.5],
+                                  [-0.5,-0.5,-0.5]])
+                current = cv2.filter2D(current, -1, kernel)
+                
+                # Apply slight denoising
+                current = cv2.fastNlMeansDenoisingColored(current, None, 3, 3, 7, 21)
+                
+            return current
+        except Exception as e:
+            raise RuntimeError(f"Advanced upscaling failed: {str(e)}")

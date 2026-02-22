@@ -1,8 +1,8 @@
-from PyQt5.QtWidgets import QToolTip, QWidget,QSlider,QSpinBox,QDoubleSpinBox
-from PyQt5.QtCore import QTimer, QPoint, Qt, QObject
-from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import QToolTip, QWidget, QSlider, QSpinBox, QDoubleSpinBox
+from PyQt5.QtCore import QTimer, QPoint, Qt, QObject, QEvent
+from PyQt5.QtGui import QFont, QHelpEvent,QCursor
 
-class TooltipManager(QObject):  # Must inherit from QObject
+class TooltipManager(QObject):
     """Manage tooltips for all UI elements"""
     
     TOOLTIPS = {
@@ -82,7 +82,36 @@ class TooltipManager(QObject):  # Must inherit from QObject
         'format_combo': 'Select output format',
         'quality_slider': 'Set image quality (higher = better quality, larger file)',
         'strip_metadata_check': 'Remove metadata from exported image',
-        'keep_aspect_check': 'Maintain original aspect ratio when resizing'
+        'keep_aspect_check': 'Maintain original aspect ratio when resizing',
+        
+        # Menu items
+        'file_menu': 'File operations - Open, Save, Export, Exit',
+        'edit_menu': 'Edit operations - Undo, Redo, Reset',
+        'image_menu': 'Image transformations - Crop, Resize, Rotate, Flip',
+        'filter_menu': 'Apply filters to image',
+        'ai_menu': 'AI-powered image enhancements',
+        'view_menu': 'View options - Compare, Zoom',
+        'layer_menu': 'Layer management',
+        'tools_menu': 'Tools and preferences',
+        'help_menu': 'Help and about',
+        
+        # Toolbar items
+        'toolbar_open': 'Open image (Ctrl+O)',
+        'toolbar_save': 'Save image (Ctrl+S)',
+        'toolbar_undo': 'Undo last operation (Ctrl+Z)',
+        'toolbar_redo': 'Redo last operation (Ctrl+Y)',
+        'toolbar_crop': 'Crop image (Ctrl+Shift+C)',
+        'toolbar_rotate': 'Rotate image 90° right',
+        'toolbar_auto': 'Auto enhance image',
+        'toolbar_denoise': 'Remove noise',
+        'toolbar_style': 'Apply style transfer',
+        'toolbar_compare': 'Compare before/after (Ctrl+D)',
+        'toolbar_layers': 'Toggle layer mode',
+        
+        # Status bar items
+        'status_label': 'Current status',
+        'progress_bar': 'Operation progress',
+        'theme_indicator': 'Current theme',
     }
     
     def __init__(self, parent=None):
@@ -96,8 +125,11 @@ class TooltipManager(QObject):  # Must inherit from QObject
         
     def setup_tooltips(self, widget: QWidget):
         """Setup tooltips for all child widgets"""
+        if not widget:
+            return
+            
         for child in widget.findChildren(QWidget):
-            if child.objectName() in self.TOOLTIPS:
+            if child.objectName() and child.objectName() in self.TOOLTIPS:
                 child.setToolTip(self.TOOLTIPS[child.objectName()])
                 child.setToolTipDuration(5000)  # 5 seconds
                 
@@ -115,22 +147,31 @@ class TooltipManager(QObject):  # Must inherit from QObject
         """Custom event filter for advanced tooltip handling"""
         if not self.tooltips_enabled:
             return super().eventFilter(obj, event)
+        
+        # Handle tooltip events
+        if event.type() == QEvent.ToolTip:
+            # Let Qt handle normal tooltips
+            return False
             
-        if event.type() == event.Enter:
-            # Start timer for delayed tooltip
+        elif event.type() == QEvent.Enter:
+            # Start timer for delayed custom tooltip
             self.current_widget = obj
-            self.current_pos = event.globalPos()
+            self.current_pos = event.globalPos() if hasattr(event, 'globalPos') else QCursor.pos()
             self.timer.start(500)  # 500ms delay
+            return False
             
-        elif event.type() == event.Leave:
+        elif event.type() == QEvent.Leave:
             # Cancel timer
             self.timer.stop()
             self.current_widget = None
             QToolTip.hideText()
+            return False
             
-        elif event.type() == event.MouseMove:
+        elif event.type() == QEvent.MouseMove:
             # Update position for tooltip
-            self.current_pos = event.globalPos()
+            if hasattr(event, 'globalPos'):
+                self.current_pos = event.globalPos()
+            return False
             
         return super().eventFilter(obj, event)
     
@@ -139,10 +180,12 @@ class TooltipManager(QObject):  # Must inherit from QObject
         if self.current_widget and self.current_pos and self.tooltips_enabled:
             text = self.current_widget.toolTip()
             if text:
-                # Add extra info for certain widgets
+                # Add extra info for certain widget types
                 if isinstance(self.current_widget, QSlider):
                     value = self.current_widget.value()
-                    text += f"\nCurrent value: {value}"
+                    minimum = self.current_widget.minimum()
+                    maximum = self.current_widget.maximum()
+                    text += f"\nCurrent value: {value} (Range: {minimum} to {maximum})"
                 elif isinstance(self.current_widget, QSpinBox):
                     value = self.current_widget.value()
                     text += f"\nCurrent value: {value}"
@@ -150,13 +193,44 @@ class TooltipManager(QObject):  # Must inherit from QObject
                     value = self.current_widget.value()
                     text += f"\nCurrent value: {value:.2f}"
                 
+                # Show tooltip at stored position
                 QToolTip.showText(self.current_pos, text, self.current_widget)
     
     @staticmethod
     def add_tooltip(widget: QWidget, text: str, shortcut: str = None):
         """Add tooltip to widget with optional shortcut"""
+        if not widget:
+            return
+            
         if shortcut:
             text += f" ({shortcut})"
         widget.setToolTip(text)
         widget.setToolTipDuration(5000)
         widget.setStatusTip(text)  # Also show in status bar
+    
+    def remove_tooltips(self, widget: QWidget):
+        """Remove tooltips from all child widgets"""
+        if not widget:
+            return
+            
+        for child in widget.findChildren(QWidget):
+            child.setToolTip("")
+            child.removeEventFilter(self)
+    
+    def refresh_tooltips(self, widget: QWidget):
+        """Refresh tooltips for all child widgets"""
+        self.remove_tooltips(widget)
+        self.setup_tooltips(widget)
+    
+    def get_tooltip_text(self, object_name: str) -> str:
+        """Get tooltip text for an object name"""
+        return self.TOOLTIPS.get(object_name, "")
+    
+    def add_custom_tooltip(self, object_name: str, tooltip_text: str):
+        """Add or update a custom tooltip in the dictionary"""
+        if object_name and tooltip_text:
+            self.TOOLTIPS[object_name] = tooltip_text
+    
+    def get_all_tooltips(self) -> dict:
+        """Get all tooltips dictionary"""
+        return self.TOOLTIPS.copy()

@@ -5,13 +5,15 @@ from PyQt5.QtWidgets import (
     QGroupBox, QSpinBox, QDoubleSpinBox,
     QComboBox, QSplitter, QScrollArea, QMenuBar,
     QMenu, QMessageBox, QListWidget, QDialog, QCheckBox,
-    QTabWidget, QRadioButton, QButtonGroup, QActionGroup,QApplication
+    QTabWidget, QRadioButton, QButtonGroup, QActionGroup, QApplication, QTextEdit,
+    QFrame, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
-from PyQt5.QtGui import QPixmap, QIcon
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QTimer
+from PyQt5.QtGui import QPixmap, QIcon, QFont, QColor
 from PIL import Image
 import io
 import os
+import tempfile
 
 from views.image_view import ImageView
 from controllers.image_controller import ImageController
@@ -21,6 +23,8 @@ from views.comparison_view import ComparisonView
 from views.export_dialog import ExportDialog
 from controllers.batch_controller import BatchController
 from views.layer_panel import LayerPanel
+from views.histogram_widget import HistogramWidget
+from views.image_gen_dialog import ImageGenDialog
 
 # UX Improvements imports
 from utils.theme_manager import ThemeManager
@@ -59,6 +63,10 @@ class MainWindow(QMainWindow):
         self.export_dialog = None
         self.batch_dialog = None
         self.layer_panel = None
+        self.gen_dialog = None
+        self.autosave_check = None
+        self.autosave_interval = None
+        self.tooltips_check = None
         
         # UX Improvements
         self.theme_manager = ThemeManager()
@@ -82,6 +90,27 @@ class MainWindow(QMainWindow):
         self.format_combo = None
         self.output_dir_label = None
         self.batch_progress = None
+        self.histogram_widget = None
+        self.quick_prompt_edit = None
+        
+        # Action shortcut mapping
+        self.ACTION_SHORTCUT_IDS = {
+            'open': 'file_open', 'save': 'file_save', 'save_as': 'file_save_as',
+            'export': 'file_export', 'exit': 'file_exit',
+            'undo': 'edit_undo', 'redo': 'edit_redo', 'reset': 'edit_reset',
+            'crop': 'image_crop', 'resize': 'image_resize',
+            'rotate_90': 'image_rotate_right', 'rotate_270': 'image_rotate_left',
+            'flip_h': 'image_flip_h', 'flip_v': 'image_flip_v',
+            'blur': None, 'edge': None,
+            'denoise': 'ai_denoise', 'auto_enhance': 'ai_auto_enhance',
+            'super_res': 'ai_super_res', 'remove_bg': 'ai_remove_bg',
+            'facial': 'ai_facial', 'colorize': None,
+            'compare': 'view_compare', 'zoom_in': 'view_zoom_in', 'zoom_out': 'view_zoom_out',
+            'fit': 'view_fit', 'actual': 'view_actual',
+            'new_layer': 'layer_new', 'duplicate_layer': 'layer_duplicate',
+            'delete_layer': 'layer_delete', 'merge_down': 'layer_merge',
+            'flatten': 'layer_flatten', 'about': 'help_about',
+        }
         
         self.init_ui()
         self.connect_signals()
@@ -91,8 +120,8 @@ class MainWindow(QMainWindow):
         
     def init_ui(self):
         """Initialize the complete user interface"""
-        self.setWindowTitle("Image Editor")
-        self.setWindowIcon(QIcon("assets/icon.ico"))
+        self.setWindowTitle("AI Image Editor")
+        self.setWindowIcon(QIcon("assets/icon.ico") if os.path.exists("assets/icon.ico") else QIcon())
         self.setGeometry(100, 100, 1600, 900)
         self.setObjectName("MainWindow")
         
@@ -173,8 +202,9 @@ class MainWindow(QMainWindow):
         self.layer_mode_btn.setObjectName("layer_mode_btn")
         self.status_bar.addPermanentWidget(self.layer_mode_btn)
         
-        # Theme indicator
-        self.theme_indicator = QLabel(f"🎨 {self.theme_manager.current_theme.title()}")
+        # Theme indicator (display name)
+        theme_display = self.theme_manager.THEMES.get(self.theme_manager.current_theme, {}).get('name', 'Theme')
+        self.theme_indicator = QLabel(f"🎨 {theme_display}")
         self.theme_indicator.setObjectName("theme_indicator")
         self.status_bar.addPermanentWidget(self.theme_indicator)
         
@@ -184,10 +214,12 @@ class MainWindow(QMainWindow):
         panel.setObjectName("left_panel")
         layout = QVBoxLayout(panel)
         layout.setSpacing(10)
-        
+        layout.setContentsMargins(6, 6, 6, 6)
+
         # Create tab widget for different tool categories
         tab_widget = QTabWidget()
         tab_widget.setObjectName("left_tab_widget")
+        tab_widget.tabBar().setExpanding(True)
         
         # Tab 1: Basic Tools
         basic_tab = self.create_basic_tools_tab()
@@ -211,9 +243,14 @@ class MainWindow(QMainWindow):
     
     def create_basic_tools_tab(self) -> QWidget:
         """Create basic tools tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("basic_tools_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # File Operations Group
         file_group = QGroupBox("File Operations")
@@ -282,13 +319,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(compare_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
     
     def create_adjustments_tab(self) -> QWidget:
         """Create adjustments tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("adjustments_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # Basic Adjustments Group
         adjust_group = QGroupBox("Color Adjustments")
@@ -386,13 +429,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(advanced_color_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
     
     def create_filters_tab(self) -> QWidget:
         """Create filters tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("filters_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # Basic Filters Group
         basic_filters_group = QGroupBox("Basic Filters")
@@ -431,13 +480,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(ai_filters_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
     
     def create_transform_tab(self) -> QWidget:
         """Create transform tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("transform_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # Rotation Group
         rotate_group = QGroupBox("Rotation")
@@ -520,7 +575,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(resize_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
         
     def create_image_panel(self) -> QWidget:
         """Create the center panel with image view and info"""
@@ -533,7 +589,6 @@ class MainWindow(QMainWindow):
         scroll_area.setObjectName("image_scroll_area")
         scroll_area.setWidgetResizable(True)
         scroll_area.setAlignment(Qt.AlignCenter)
-        scroll_area.setStyleSheet("QScrollArea { background-color: #2b2b2b; border: none; }")
         
         self.image_view = ImageView()
         self.image_view.setObjectName("image_view")
@@ -543,41 +598,41 @@ class MainWindow(QMainWindow):
         
         # Image info bar
         info_bar = QHBoxLayout()
-        
+        info_bar.setContentsMargins(8, 4, 8, 4)
+
         self.info_label = QLabel("No image loaded")
         self.info_label.setObjectName("info_label")
-        self.info_label.setAlignment(Qt.AlignCenter)
-        self.info_label.setStyleSheet("QLabel { color: #888; padding: 5px; }")
+        self.info_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         info_bar.addWidget(self.info_label)
         
         # Zoom controls
         zoom_out_btn = QPushButton("−")
         zoom_out_btn.setObjectName("zoom_out_btn")
-        zoom_out_btn.setFixedSize(30, 30)
+        zoom_out_btn.setFixedSize(60, 40)
         zoom_out_btn.clicked.connect(self.image_view.zoom_out)
         info_bar.addWidget(zoom_out_btn)
         
         self.zoom_label = QLabel("100%")
         self.zoom_label.setObjectName("zoom_label")
-        self.zoom_label.setFixedWidth(50)
+        self.zoom_label.setFixedWidth(70)
         self.zoom_label.setAlignment(Qt.AlignCenter)
         info_bar.addWidget(self.zoom_label)
         
         zoom_in_btn = QPushButton("+")
         zoom_in_btn.setObjectName("zoom_in_btn")
-        zoom_in_btn.setFixedSize(30, 30)
+        zoom_in_btn.setFixedSize(60, 40)
         zoom_in_btn.clicked.connect(self.image_view.zoom_in)
         info_bar.addWidget(zoom_in_btn)
         
         fit_btn = QPushButton("Fit")
         fit_btn.setObjectName("fit_btn")
-        fit_btn.setFixedSize(50, 30)
+        fit_btn.setFixedSize(60, 40)
         fit_btn.clicked.connect(self.image_view.zoom_to_fit)
         info_bar.addWidget(fit_btn)
         
         actual_btn = QPushButton("100%")
         actual_btn.setObjectName("actual_btn")
-        actual_btn.setFixedSize(50, 30)
+        actual_btn.setFixedSize(60, 40)
         actual_btn.clicked.connect(self.image_view.zoom_actual)
         info_bar.addWidget(actual_btn)
         
@@ -593,22 +648,25 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setObjectName("right_panel")
         layout = QVBoxLayout(panel)
+        layout.setSpacing(10)
+        layout.setContentsMargins(6, 6, 6, 6)
         
         # Create tab widget
         tab_widget = QTabWidget()
         tab_widget.setObjectName("right_tab_widget")
-        
+        tab_widget.tabBar().setExpanding(True)
+
         # AI Tools Tab
         ai_tab = self.create_ai_tools_tab()
         tab_widget.addTab(ai_tab, "AI Tools")
         
         # Style Transfer Tab
         style_tab = self.create_style_tab()
-        tab_widget.addTab(style_tab, "Style Transfer")
+        tab_widget.addTab(style_tab, "Style")
         
         # Advanced AI Tab
         advanced_tab = self.create_advanced_ai_tab()
-        tab_widget.addTab(advanced_tab, "Advanced AI")
+        tab_widget.addTab(advanced_tab, "Adv. AI")
         
         # Layers Tab
         self.layer_panel = LayerPanel()
@@ -624,16 +682,117 @@ class MainWindow(QMainWindow):
         self.layer_panel.layer_blend_changed.connect(self.on_layer_blend_changed)
         self.layer_panel.layer_visibility_changed.connect(self.on_layer_visibility_changed)
         tab_widget.addTab(self.layer_panel, "Layers")
-        
+
+        # Generate Tab
+        gen_tab = self.create_generate_tab()
+        tab_widget.addTab(gen_tab, "Generate")
+
+        # Histogram Tab
+        histogram_tab = self.create_histogram_tab()
+        tab_widget.addTab(histogram_tab, "Histogram")
+
         layout.addWidget(tab_widget)
-        
+
         return panel
+
+    def create_generate_tab(self) -> QWidget:
+        """Create AI image generation quick-launch tab."""
+        widget = QWidget()
+        widget.setObjectName("generate_tab")
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(10)
+
+        # Title card
+        title_lbl = QLabel("✨ AI Image Generation")
+        title_lbl.setObjectName("gen_title")
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_lbl.setFont(title_font)
+        title_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_lbl)
+
+        sub_lbl = QLabel("Generate any image from a text description\nusing free AI (no API key needed)")
+        sub_lbl.setObjectName("gen_subtitle")
+        sub_font = QFont()
+        sub_font.setPointSize(10)
+        sub_lbl.setFont(sub_font)
+        sub_lbl.setAlignment(Qt.AlignCenter)
+        sub_lbl.setWordWrap(True)
+        layout.addWidget(sub_lbl)
+
+        prompt_group = QGroupBox("Quick Prompt")
+        prompt_layout = QVBoxLayout(prompt_group)
+
+        self.quick_prompt_edit = QTextEdit()
+        self.quick_prompt_edit.setPlaceholderText(
+            "Describe the image...\ne.g. 'A sunset over misty mountains, photorealistic'"
+        )
+        self.quick_prompt_edit.setMinimumHeight(80)
+        self.quick_prompt_edit.setMaximumHeight(100)
+        prompt_layout.addWidget(self.quick_prompt_edit)
+
+        layout.addWidget(prompt_group)
+
+        self.quick_gen_btn = QPushButton("🚀 Generate Image")
+        self.quick_gen_btn.setObjectName("ai_generate_btn")
+        self.quick_gen_btn.setMinimumHeight(40)
+        self.quick_gen_btn.setToolTip("Open the full AI generation studio")
+        self.quick_gen_btn.clicked.connect(self.show_image_gen_dialog)
+        layout.addWidget(self.quick_gen_btn)
+
+        full_btn = QPushButton("🎨 Open Generation Studio")
+        full_btn.clicked.connect(lambda: self.show_image_gen_dialog(True))
+        full_btn.setToolTip("Open the full generation dialog with all options")
+        layout.addWidget(full_btn)
+
+        # Features list
+        features_group = QGroupBox("Capabilities")
+        features_layout = QVBoxLayout(features_group)
+        features = [
+            "• Free — no API key required",
+            "• Multiple aspect ratios",
+            "• Style presets (Photorealistic, Anime...)",
+            "• Negative prompts",
+            "• Reproducible seeds",
+            "• High-res output (up to 1536px)",
+        ]
+        for feat in features:
+            lbl = QLabel(feat)
+            lbl.setObjectName("info_label")
+            features_layout.addWidget(lbl)
+        layout.addWidget(features_group)
+
+        layout.addStretch()
+        return widget
+
+    def create_histogram_tab(self) -> QWidget:
+        """Create histogram viewer tab."""
+        widget = QWidget()
+        widget.setObjectName("histogram_tab")
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(8)
+
+        self.histogram_widget = HistogramWidget()
+        layout.addWidget(self.histogram_widget)
+
+        refresh_btn = QPushButton("↻ Refresh")
+        refresh_btn.clicked.connect(self._refresh_histogram)
+        layout.addWidget(refresh_btn)
+
+        layout.addStretch()
+        return widget
     
     def create_ai_tools_tab(self) -> QWidget:
         """Create AI tools tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("ai_tools_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # AI Enhancements Group
         ai_group = QGroupBox("AI Enhancements")
@@ -672,13 +831,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(face_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
     
     def create_style_tab(self) -> QWidget:
         """Create style transfer tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("style_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # Style Transfer Group
         style_group = QGroupBox("Artistic Styles")
@@ -702,13 +867,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(style_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
     
     def create_advanced_ai_tab(self) -> QWidget:
         """Create advanced AI tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         widget = QWidget()
         widget.setObjectName("advanced_ai_tab")
         layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         # Background Removal Group
         bg_group = QGroupBox("Background")
@@ -737,7 +908,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(color_group)
         
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
         
     def create_menu_bar(self):
         """Create the complete menu bar with UX improvements"""
@@ -892,7 +1064,15 @@ class MainWindow(QMainWindow):
         # AI menu
         ai_menu = menubar.addMenu("&AI")
         ai_menu.setObjectName("ai_menu")
-        
+
+        gen_action = QAction("✨ Generate Image from Prompt...", self)
+        gen_action.setObjectName("gen_image_action")
+        gen_action.setShortcut("Ctrl+G")
+        gen_action.triggered.connect(self.show_image_gen_dialog)
+        ai_menu.addAction(gen_action)
+
+        ai_menu.addSeparator()
+
         auto_enhance_action = QAction("✨ Auto Enhance", self)
         auto_enhance_action.setObjectName("auto_enhance_action")
         auto_enhance_action.setShortcut(self.shortcut_manager.get_shortcut('ai_auto_enhance'))
@@ -1131,25 +1311,6 @@ class MainWindow(QMainWindow):
             # Reapply shortcuts to all actions
             self.apply_shortcuts()
 
-    # Map action object names (with _action stripped or toolbar_ prefix) to shortcut manager keys
-    ACTION_SHORTCUT_IDS = {
-        'open': 'file_open', 'save': 'file_save', 'save_as': 'file_save_as',
-        'export': 'file_export', 'exit': 'file_exit',
-        'undo': 'edit_undo', 'redo': 'edit_redo', 'reset': 'edit_reset',
-        'crop': 'image_crop', 'resize': 'image_resize',
-        'rotate_90': 'image_rotate_right', 'rotate_270': 'image_rotate_left',
-        'flip_h': 'image_flip_h', 'flip_v': 'image_flip_v',
-        'blur': None, 'edge': None,
-        'denoise': 'ai_denoise', 'auto_enhance': 'ai_auto_enhance',
-        'super_res': 'ai_super_res', 'remove_bg': 'ai_remove_bg',
-        'facial': 'ai_facial', 'colorize': None,
-        'compare': 'view_compare', 'zoom_in': 'view_zoom_in', 'zoom_out': 'view_zoom_out',
-        'fit': 'view_fit', 'actual': 'view_actual',
-        'new_layer': 'layer_new', 'duplicate_layer': 'layer_duplicate',
-        'delete_layer': 'layer_delete', 'merge_down': 'layer_merge',
-        'flatten': 'layer_flatten', 'about': 'help_about',
-    }
-
     def apply_shortcuts(self):
         """Apply keyboard shortcuts to all actions"""
         if not hasattr(self.shortcut_manager, 'get_shortcut'):
@@ -1172,7 +1333,8 @@ class MainWindow(QMainWindow):
     def switch_theme(self, theme_name):
         """Switch application theme"""
         self.theme_manager.apply_theme(QApplication.instance(), theme_name)
-        self.theme_indicator.setText(f"🎨 {theme_name.title()}")
+        theme_display = self.theme_manager.THEMES.get(theme_name, {}).get('name', theme_name)
+        self.theme_indicator.setText(f"🎨 {theme_display}")
         self.tooltip_manager.setup_tooltips(self)  # Update tooltips for new theme
 
     def show_preferences(self):
@@ -1385,6 +1547,14 @@ class MainWindow(QMainWindow):
         layer_action.setCheckable(True)
         layer_action.toggled.connect(self.toggle_layer_mode)
         toolbar.addAction(layer_action)
+
+        toolbar.addSeparator()
+
+        gen_action = QAction("✨ Generate", self)
+        gen_action.setObjectName("toolbar_generate")
+        gen_action.setToolTip("AI Image Generation — create images from text prompts")
+        gen_action.triggered.connect(self.show_image_gen_dialog)
+        toolbar.addAction(gen_action)
         
     def connect_signals(self):
         """Connect all controller signals to UI"""
@@ -1460,6 +1630,10 @@ class MainWindow(QMainWindow):
             self.image_view.setPixmap(pixmap)
             self.update_image_info()
             self.update_layer_panel()
+            if self.histogram_widget and self.controller.image_model.current_image:
+                self.histogram_widget.update_from_image(
+                    self.controller.image_model.current_image
+                )
             
     def update_image_info(self):
         """Update image information display"""
@@ -1571,6 +1745,59 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Colorize", "Please open an image first.")
             return
         self.controller.ai_colorize()
+
+    # ========== AI Image Generation ==========
+
+    def show_image_gen_dialog(self, full: bool = False):
+        """Open the AI image generation dialog."""
+        self.gen_dialog = ImageGenDialog(self)
+
+        if hasattr(self, 'quick_prompt_edit') and self.quick_prompt_edit:
+            quick_text = self.quick_prompt_edit.toPlainText().strip()
+            if quick_text:
+                self.gen_dialog.prompt_edit.setPlainText(quick_text)
+
+        self.gen_dialog.image_generated.connect(self._on_generated_image)
+        self.gen_dialog.show()
+
+    def _on_generated_image(self, pil_image):
+        """Handle image received from the generation dialog."""
+        try:
+            # Save to temporary file and load through controller
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp_path = tmp.name
+            pil_image.save(tmp_path, format="PNG")
+
+            self.controller.load_image(tmp_path)
+
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+            self.save_btn.setEnabled(True)
+            self.export_btn.setEnabled(True)
+            self.update_status("AI-generated image loaded  ✨")
+            if hasattr(self, 'quick_prompt_edit') and self.quick_prompt_edit:
+                self.quick_prompt_edit.clear()
+        except Exception as e:
+            # Fallback: set image directly without going through the file loader
+            try:
+                self.controller.image_model.current_image = pil_image.copy()
+                self.controller.image_model.original_image = pil_image.copy()
+                self.controller.image_updated.emit()
+                self.save_btn.setEnabled(True)
+                self.export_btn.setEnabled(True)
+                self.update_status("Generated image loaded")
+            except Exception as fallback_error:
+                QMessageBox.critical(self, "Error", f"Failed to load generated image: {str(e)}")
+
+    def _refresh_histogram(self):
+        """Refresh the histogram panel from the current image."""
+        if self.histogram_widget and self.controller.image_model.current_image:
+            self.histogram_widget.update_from_image(
+                self.controller.image_model.current_image
+            )
         
     # ========== Crop Tool ==========
     
@@ -1846,19 +2073,17 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         
         start_btn = QPushButton("Start Processing")
-        start_btn.setObjectName("batch_start_btn")
+        start_btn.setObjectName("primary_btn")
         start_btn.clicked.connect(lambda: self.start_batch_processing(self.batch_dialog))
-        start_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px;")
         btn_layout.addWidget(start_btn)
-        
+
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setObjectName("batch_cancel_btn")
+        cancel_btn.setObjectName("danger_btn")
         def on_batch_cancel():
             if self.batch_controller and self.batch_controller.is_processing:
                 self.batch_controller.cancel_batch()
             self.batch_dialog.reject()
         cancel_btn.clicked.connect(on_batch_cancel)
-        cancel_btn.setStyleSheet("background-color: #f44336; color: white; padding: 5px;")
         btn_layout.addWidget(cancel_btn)
         
         layout.addLayout(btn_layout)
@@ -2187,35 +2412,31 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About AI Image Editor",
-            """<h2>AI Image Editor & Enhancer</h2>
-            <p><b>Version 2.0</b></p>
-            <p>A professional image editor with AI-powered enhancement features.</p>
-            
-            <h3>Features:</h3>
+            """<h2>AI Image Editor</h2>
+            <p><b>Version 4.0</b> — Professional grade · 2026 Edition</p>
+            <p>Modern image editor with AI-powered enhancements, image generation from prompts,
+            and a premium 2026-style interface.</p>
+
+            <h3>✨ New in v4.0</h3>
             <ul>
-                <li>Basic image editing tools (crop, rotate, flip, resize)</li>
-                <li>Color adjustments (brightness, contrast, saturation, sharpness)</li>
-                <li>Filters and effects (blur, edge enhance)</li>
-                <li>AI-based enhancements (auto enhance, denoise, super resolution)</li>
-                <li>Style transfer (cartoon, sketch, oil painting, watercolor, comic, vintage)</li>
-                <li>Background removal with AI</li>
-                <li>Facial feature enhancement</li>
-                <li>Black & white colorization</li>
-                <li>Layer support with blend modes</li>
-                <li>Batch processing</li>
-                <li>Before/after comparison</li>
-                <li>Advanced export options</li>
+                <li><b>AI Image Generation</b> — generate any image from a text prompt (free, no API key)</li>
+                <li><b>Histogram Viewer</b> — live RGB channel histogram with statistics</li>
+                <li><b>5 Premium Themes</b> — Neon Dark, Classic Dark, Light, High Contrast, Midnight Purple</li>
+                <li>Animated loading spinner, gradient progress bars</li>
             </ul>
-            
-            <h3>UX Improvements:</h3>
+
+            <h3>Core Features</h3>
             <ul>
-                <li>Customizable themes (Dark, Light, High Contrast)</li>
-                <li>Workspace persistence</li>
-                <li>Keyboard shortcut customization</li>
-                <li>Comprehensive tooltips</li>
-                <li>Recent files menu</li>
-                <li>Preferences dialog</li>
+                <li>Edit: crop, rotate, flip, resize</li>
+                <li>Color: brightness, contrast, saturation, sharpness, hue, gamma</li>
+                <li>Filters: blur, edge enhance, AI denoise, super resolution</li>
+                <li>AI: auto enhance, remove background, face enhance, colorize B&amp;W</li>
+                <li>Style transfer: cartoon, sketch, oil, watercolor, comic, vintage</li>
+                <li>Layers with 10 blend modes and per-layer opacity</li>
+                <li>Batch processing (resize, brightness, contrast, format conversion)</li>
+                <li>Before/after comparison (vertical, horizontal, swipe modes)</li>
+                <li>Export with quality and size options (JPEG, PNG, WEBP, TIFF, BMP, GIF)</li>
             </ul>
-            
-            <p><i>Built with PyQt5 and OpenCV</i></p>"""
+
+            <p><i>PyQt5 · Pillow · OpenCV · scikit-image · Pollinations.ai</i></p>"""
         )

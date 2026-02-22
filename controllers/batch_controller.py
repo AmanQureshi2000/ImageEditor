@@ -114,6 +114,9 @@ class BatchProcessingThread(QThread):
             else:
                 output_path = os.path.join(self.output_dir, base_name)
             
+            if self._is_cancelled:
+                return
+
             # Ensure output directory exists
             os.makedirs(self.output_dir, exist_ok=True)
             
@@ -147,7 +150,8 @@ class BatchProcessingThread(QThread):
                     save_kwargs['quality'] = 95
                     save_kwargs['optimize'] = True
 
-            img.save(output_path, **save_kwargs)
+            if not self._is_cancelled:
+                img.save(output_path, **save_kwargs)
             
         except Exception as e:
             raise RuntimeError(f"Failed to process {os.path.basename(file_path)}: {str(e)}") 

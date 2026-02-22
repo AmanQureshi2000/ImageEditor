@@ -87,6 +87,8 @@ class LayerManager:
             del self.layers[index]
             if self.active_layer_index >= len(self.layers):
                 self.active_layer_index = len(self.layers) - 1
+            elif self.active_layer_index > index:
+                self.active_layer_index -= 1
             self._update_canvas_size()
     
     def move_layer(self, from_index: int, to_index: int):
@@ -107,16 +109,18 @@ class LayerManager:
         if len(indices) < 2:
             return None
         
-        # Sort indices in reverse order
-        indices.sort(reverse=True)
+        # Sort indices in ascending order for processing
+        indices.sort()
         
-        # Get the bottom layer as base
-        base_index = indices[-1]
+        # Get the bottom layer as base (lowest index)
+        base_index = indices[0]
         base_layer = self.layers[base_index]
         
-        # Composite all layers onto base (bottom to top: composite in ascending index order)
+        # Start with base layer image
         result_image = base_layer.image.copy()
-        for idx in reversed(indices[:-1]):  # Skip the base, composite lower indices first
+        
+        # Composite all layers above the base (excluding the base itself)
+        for idx in indices[1:]:
             layer = self.layers[idx]
             if layer.visible:
                 result_image = self._blend_images(
@@ -129,12 +133,17 @@ class LayerManager:
         # Create merged layer
         merged_layer = Layer(result_image, "Merged Layer")
         
-        # Remove merged layers (highest index first to avoid index shift)
-        for idx in indices:
+        # Remove merged layers (from highest to lowest to avoid index shift)
+        for idx in sorted(indices, reverse=True):
             self.remove_layer(idx)
         
         # Insert the merged layer at the position of the bottom-most merged layer
-        self.add_layer(merged_layer, base_index)
+        insert_pos = min(base_index, len(self.layers))
+        self.layers.insert(insert_pos, merged_layer)
+        self.active_layer_index = insert_pos
+        
+        # Update canvas size
+        self._update_canvas_size()
         
         return merged_layer
     
@@ -143,23 +152,35 @@ class LayerManager:
         if not self.layers:
             return None
         
-        # Get canvas size
-        w, h = self.width or self.layers[0].image.width, self.height or self.layers[0].image.height
+        # Get canvas size from the largest layer or use first layer's size
+        w, h = self.width, self.height
         if w <= 0 or h <= 0:
-            w, h = self.layers[0].image.size
+            # Find max dimensions from all layers
+            w = max((layer.image.width for layer in self.layers), default=0)
+            h = max((layer.image.height for layer in self.layers), default=0)
         
-        # Start with transparent/white base so first layer's opacity and blend are applied
-        result = Image.new('RGBA', (w, h), (255, 255, 255, 255))
+        if w <= 0 or h <= 0:
+            return None
+        
+        # Start with transparent background
+        result = Image.new('RGBA', (w, h), (0, 0, 0, 0))
         
         # Composite all visible layers (bottom to top)
         for layer in self.layers:
             if layer.visible:
+                # Ensure image is RGBA
                 top_img = layer.image
                 if top_img.mode != 'RGBA':
                     top_img = top_img.convert('RGBA')
+                
+                # Create a canvas-sized version of the layer image
+                layer_canvas = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+                # Paste the layer image at the top-left corner (assuming same coordinate system)
+                layer_canvas.paste(top_img, (0, 0))
+                
                 result = self._blend_images(
                     result,
-                    top_img,
+                    layer_canvas,
                     layer.blend_mode,
                     layer.opacity
                 )
@@ -169,42 +190,76 @@ class LayerManager:
     def _blend_images(self, bottom: Image.Image, top: Image.Image, 
                       mode: str, opacity: float) -> Image.Image:
         """Blend two images with specified mode"""
+        # Ensure both images are RGBA for consistent processing
+        if bottom.mode != 'RGBA':
+            bottom = bottom.convert('RGBA')
+        if top.mode != 'RGBA':
+            top = top.convert('RGBA')
+        
         # Ensure both images are the same size
         if bottom.size != top.size:
             top = top.resize(bottom.size, Image.Resampling.LANCZOS)
         
-        # Convert to numpy for blending
+        # Convert to numpy for blending (0-255 range)
         bottom_np = np.array(bottom).astype(np.float32)
         top_np = np.array(top).astype(np.float32)
         
-        # Apply blend mode
-        if mode == 'normal':
-            result = bottom_np * (1 - opacity) + top_np * opacity
-        elif mode == 'multiply':
-            result = bottom_np * top_np / 255.0
-            result = bottom_np * (1 - opacity) + result * opacity
-        elif mode == 'screen':
-            result = 255 - (255 - bottom_np) * (255 - top_np) / 255.0
-            result = bottom_np * (1 - opacity) + result * opacity
-        elif mode == 'overlay':
-            mask = bottom_np < 128
-            result = np.where(mask, 
-                            2 * bottom_np * top_np / 255.0,
-                            255 - 2 * (255 - bottom_np) * (255 - top_np) / 255.0)
-            result = bottom_np * (1 - opacity) + result * opacity
-        elif mode == 'darken':
-            result = np.minimum(bottom_np, top_np)
-            result = bottom_np * (1 - opacity) + result * opacity
-        elif mode == 'lighten':
-            result = np.maximum(bottom_np, top_np)
-            result = bottom_np * (1 - opacity) + result * opacity
-        elif mode == 'difference':
-            result = np.abs(bottom_np - top_np)
-            result = bottom_np * (1 - opacity) + result * opacity
-        else:
-            result = bottom_np * (1 - opacity) + top_np * opacity
+        # Get alpha channels
+        bottom_alpha = bottom_np[:, :, 3:4] / 255.0 if bottom_np.shape[2] == 4 else np.ones((bottom_np.shape[0], bottom_np.shape[1], 1))
+        top_alpha = top_np[:, :, 3:4] / 255.0 if top_np.shape[2] == 4 else np.ones((top_np.shape[0], top_np.shape[1], 1))
         
-        return Image.fromarray(result.astype(np.uint8))
+        # Apply layer opacity to top alpha
+        top_alpha = top_alpha * opacity
+        
+        # Extract RGB channels
+        bottom_rgb = bottom_np[:, :, :3]
+        top_rgb = top_np[:, :, :3]
+        
+        # Apply blend mode to RGB channels
+        if mode == 'normal':
+            blended_rgb = top_rgb
+        elif mode == 'multiply':
+            blended_rgb = bottom_rgb * top_rgb / 255.0
+        elif mode == 'screen':
+            blended_rgb = 255 - (255 - bottom_rgb) * (255 - top_rgb) / 255.0
+        elif mode == 'overlay':
+            mask = bottom_rgb < 128
+            blended_rgb = np.where(mask, 
+                                  2 * bottom_rgb * top_rgb / 255.0,
+                                  255 - 2 * (255 - bottom_rgb) * (255 - top_rgb) / 255.0)
+        elif mode == 'darken':
+            blended_rgb = np.minimum(bottom_rgb, top_rgb)
+        elif mode == 'lighten':
+            blended_rgb = np.maximum(bottom_rgb, top_rgb)
+        elif mode == 'difference':
+            blended_rgb = np.abs(bottom_rgb - top_rgb)
+        elif mode == 'exclusion':
+            blended_rgb = bottom_rgb + top_rgb - 2 * bottom_rgb * top_rgb / 255.0
+        elif mode == 'soft_light':
+            blended_rgb = 255 - (255 - bottom_rgb) * (255 - (top_rgb / 255.0)) / 255.0
+        elif mode == 'hard_light':
+            mask = top_rgb < 128
+            blended_rgb = np.where(mask,
+                                  2 * bottom_rgb * top_rgb / 255.0,
+                                  255 - 2 * (255 - bottom_rgb) * (255 - top_rgb) / 255.0)
+        else:
+            blended_rgb = top_rgb
+        
+        # Composite using alpha compositing formula: result = bottom * (1 - top_alpha) + blended * top_alpha
+        # Expand dimensions for broadcasting
+        top_alpha_expanded = np.repeat(top_alpha, 3, axis=2)
+        
+        # Composite
+        result_rgb = bottom_rgb * (1 - top_alpha_expanded) + blended_rgb * top_alpha_expanded
+        
+        # Calculate result alpha (union of alphas)
+        result_alpha = bottom_alpha + top_alpha * (1 - bottom_alpha)
+        result_alpha = np.clip(result_alpha * 255, 0, 255).astype(np.uint8)
+        
+        # Combine RGB and alpha
+        result = np.dstack((result_rgb.astype(np.uint8), result_alpha))
+        
+        return Image.fromarray(result, 'RGBA')
     
     def _update_canvas_size(self):
         """Update canvas size based on layers"""
@@ -233,3 +288,23 @@ class LayerManager:
     def get_layer_count(self) -> int:
         """Get number of layers"""
         return len(self.layers)
+    
+    def get_layer_names(self) -> list:
+        """Get list of layer names"""
+        return [layer.name for layer in self.layers]
+    
+    def get_layer_thumbnails(self) -> list:
+        """Get list of layer thumbnails"""
+        return [layer.thumbnail for layer in self.layers if layer.thumbnail]
+    
+    def get_layer_opacities(self) -> list:
+        """Get list of layer opacities"""
+        return [layer.opacity for layer in self.layers]
+    
+    def get_layer_visibilities(self) -> list:
+        """Get list of layer visibilities"""
+        return [layer.visible for layer in self.layers]
+    
+    def get_layer_blend_modes(self) -> list:
+        """Get list of layer blend modes"""
+        return [layer.blend_mode for layer in self.layers]

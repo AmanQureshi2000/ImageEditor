@@ -1,4 +1,4 @@
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QWaitCondition,QMutexLocker
+from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker
 import numpy as np
 import cv2
 import traceback
@@ -29,7 +29,7 @@ class AIProcessingThread(QThread):
             self.operation = operation
             # Create a deep copy to prevent modification from main thread
             self.image = image.copy() if image is not None else None
-            self.params = params.copy()
+            self.params = params.copy() if params else {}
             self._is_cancelled = False
             self.result = None
         
@@ -40,6 +40,7 @@ class AIProcessingThread(QThread):
         
     def run(self):
         """Main thread execution"""
+        operation = None
         try:
             # Get a local copy of parameters
             with QMutexLocker(self.mutex):
@@ -49,7 +50,7 @@ class AIProcessingThread(QThread):
                 
                 operation = self.operation
                 image = self.image.copy()  # Another copy for processing
-                params = self.params.copy()
+                params = self.params.copy() if self.params else {}
                 is_cancelled = self._is_cancelled
             
             if is_cancelled:
@@ -88,132 +89,163 @@ class AIProcessingThread(QThread):
                     return
                 
                 if result is not None:
-                    self.result = result.copy()  # Store result for later
+                    self.result = result.copy() if hasattr(result, 'copy') else result
                     self.finished.emit(result)
                     self.status.emit(f"{operation} completed in {processing_time:.2f}s")
                 else:
                     self.error.emit(f"{operation} returned no result")
                 
         except Exception as e:
-            self.error.emit(f"Error in {operation}: {str(e)}")
+            error_msg = f"Error in {operation if operation else 'unknown'}: {str(e)}"
+            self.error.emit(error_msg)
             traceback.print_exc()
             
     def _enhance_resolution(self, image, params):
         """Enhance resolution with progress updates"""
-        scale = params.get('scale', 2)
-        self.progress.emit(10)
-        
-        # Check cancellation
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.enhance_resolution(image, scale)
-        self.progress.emit(80)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        # Apply additional sharpening
-        if not self._is_cancelled:
-            kernel = np.array([[-1,-1,-1],
-                              [-1, 9,-1],
-                              [-1,-1,-1]])
-            result = cv2.filter2D(result, -1, kernel)
+        try:
+            scale = params.get('scale', 2)
+            self.progress.emit(10)
             
-        self.progress.emit(100)
-        return result
+            # Check cancellation
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.enhance_resolution(image, scale)
+            self.progress.emit(80)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            # Apply additional sharpening
+            if result is not None:
+                kernel = np.array([[-1,-1,-1],
+                                  [-1, 9,-1],
+                                  [-1,-1,-1]])
+                result = cv2.filter2D(result, -1, kernel)
+                
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Enhance resolution failed: {str(e)}")
+            return None
         
     def _denoise(self, image, params):
         """Denoise image with progress updates"""
-        strength = params.get('strength', 0.1)
-        self.progress.emit(10)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.denoise_image(image, strength)
-        self.progress.emit(100)
-        return result
+        try:
+            strength = params.get('strength', 0.1)
+            self.progress.emit(10)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.denoise_image(image, strength)
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Denoise failed: {str(e)}")
+            return None
         
     def _colorize(self, image, params):
         """Colorize image with progress updates"""
-        self.progress.emit(10)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.colorize_image(image)
-        self.progress.emit(100)
-        return result
+        try:
+            self.progress.emit(10)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.colorize_image(image)
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Colorize failed: {str(e)}")
+            return None
         
     def _remove_background(self, image, params):
         """Remove background with progress updates"""
-        self.progress.emit(10)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.remove_background(image)
-        self.progress.emit(80)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        # Post-process to clean up
-        if result.shape[-1] == 4:  # Has alpha
-            alpha = result[:, :, 3]
-            alpha = cv2.GaussianBlur(alpha, (3, 3), 0)
-            result[:, :, 3] = alpha
+        try:
+            self.progress.emit(10)
             
-        self.progress.emit(100)
-        return result
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.remove_background(image)
+            self.progress.emit(80)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            # Post-process to clean up
+            if result is not None and result.shape[-1] == 4:  # Has alpha
+                alpha = result[:, :, 3]
+                alpha = cv2.GaussianBlur(alpha, (3, 3), 0)
+                result[:, :, 3] = alpha
+                
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Background removal failed: {str(e)}")
+            return None
         
     def _enhance_facial(self, image, params):
         """Enhance facial features with progress updates"""
-        self.progress.emit(10)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.enhance_facial_features(image)
-        self.progress.emit(100)
-        return result
+        try:
+            self.progress.emit(10)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.enhance_facial_features(image)
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Facial enhancement failed: {str(e)}")
+            return None
         
     def _style_transfer(self, image, params):
         """Apply style transfer with progress updates"""
-        style = params.get('style', 'cartoon')
-        self.progress.emit(10)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.style_transfer(image, style)
-        self.progress.emit(100)
-        return result
+        try:
+            style = params.get('style', 'cartoon')
+            self.progress.emit(10)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.style_transfer(image, style)
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Style transfer failed: {str(e)}")
+            return None
         
     def _auto_enhance(self, image, params):
         """Auto enhance with progress updates"""
-        self.progress.emit(10)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model.auto_enhance(image)
-        self.progress.emit(50)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        # Apply additional enhancements
-        result = self.ai_model._auto_contrast(result)
-        self.progress.emit(80)
-        
-        with QMutexLocker(self.mutex):
-            if self._is_cancelled: return None
-        
-        result = self.ai_model._enhance_colors(result)
-        self.progress.emit(100)
-        return result
+        try:
+            self.progress.emit(10)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            result = self.ai_model.auto_enhance(image)
+            self.progress.emit(50)
+            
+            with QMutexLocker(self.mutex):
+                if self._is_cancelled: return None
+            
+            # Apply additional enhancements
+            if result is not None:
+                result = self.ai_model._auto_contrast(result)
+                self.progress.emit(80)
+                
+                with QMutexLocker(self.mutex):
+                    if self._is_cancelled: return None
+                
+                result = self.ai_model._enhance_colors(result)
+                
+            self.progress.emit(100)
+            return result
+        except Exception as e:
+            self.error.emit(f"Auto enhance failed: {str(e)}")
+            return None
 
 class AIController(QObject):
     """Controller for AI-specific operations with improved thread safety"""
@@ -239,6 +271,9 @@ class AIController(QObject):
         self.thread.error.connect(self._on_processing_error)
         self.thread.status.connect(self.ai_status_updated)
         
+        # Connect thread finished to cleanup
+        self.thread.finished.connect(self._on_thread_finished)
+        
     def process_with_ai(self, operation: str, **kwargs):
         """Process image with AI operation in separate thread"""
         with QMutexLocker(self.mutex):
@@ -248,7 +283,8 @@ class AIController(QObject):
                     'operation': operation,
                     'params': kwargs
                 })
-                self.ai_status_updated.emit(f"Operation queued. {len(self.processing_queue)} waiting.")
+                queue_len = len(self.processing_queue)
+                self.ai_status_updated.emit(f"Operation queued. {queue_len} waiting.")
                 return
             
             # Get current image (create a copy for thread safety)
@@ -278,8 +314,8 @@ class AIController(QObject):
             if self.is_processing and self.thread.isRunning():
                 self.thread.cancel()
                 self.thread.quit()
-                self.thread.wait(2000)
-                if self.thread.isRunning():
+                success = self.thread.wait(2000)  # Wait up to 2 seconds
+                if not success and self.thread.isRunning():
                     self.thread.terminate()
                     self.thread.wait()
                 
@@ -312,14 +348,16 @@ class AIController(QObject):
         
         # Process next operation if any
         if next_operation:
-            self.process_with_ai(next_operation['operation'], **next_operation['params'])
+            # Use a single-shot timer to process next operation in the next event loop iteration
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self.process_with_ai(
+                next_operation['operation'], **next_operation['params']
+            ))
         else:
             self.ai_processing_finished.emit()
     
     def _on_processing_error(self, error_msg):
         """Handle processing errors"""
-        next_operation = None
-        
         with QMutexLocker(self.mutex):
             self.is_processing = False
             # Clear queue on error
@@ -327,6 +365,18 @@ class AIController(QObject):
         
         self.ai_error_occurred.emit(error_msg)
         self.ai_processing_finished.emit()
+    
+    def _on_thread_finished(self):
+        """Handle thread finished signal"""
+        # This is a safety cleanup
+        with QMutexLocker(self.mutex):
+            if not self.is_processing and self.processing_queue:
+                # If thread finished but we're not processing and have queue, process next
+                next_op = self.processing_queue.pop(0)
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.process_with_ai(
+                    next_op['operation'], **next_op['params']
+                ))
     
     def get_queue_status(self) -> dict:
         """Get current queue status"""
@@ -343,6 +393,15 @@ class AIController(QObject):
             "super_resolution": True,
             "denoising": True,
             "colorization": True,
+            "facial_enhancement": True,
+            "style_transfer": True,
+            "background_removal": True,
+            "auto_enhance": True,
             "initialized": True
         }
     
+    def clear_queue(self):
+        """Clear the processing queue"""
+        with QMutexLocker(self.mutex):
+            self.processing_queue.clear()
+            self.ai_status_updated.emit("Queue cleared")
