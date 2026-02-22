@@ -91,7 +91,8 @@ class MainWindow(QMainWindow):
         
     def init_ui(self):
         """Initialize the complete user interface"""
-        self.setWindowTitle("AI Image Editor & Enhancer - Professional Edition")
+        self.setWindowTitle("Image Editor")
+        self.setWindowIcon(QIcon("assets/icon.ico"))
         self.setGeometry(100, 100, 1600, 900)
         self.setObjectName("MainWindow")
         
