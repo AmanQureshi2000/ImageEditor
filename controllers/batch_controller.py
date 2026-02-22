@@ -42,7 +42,6 @@ class BatchProcessingThread(QThread):
                     break
                 
                 self.status.emit(f"Processing {os.path.basename(file_path)} ({i+1}/{total})")
-                self.progress.emit(i + 1, total)
                 
                 try:
                     self._process_single_image(file_path)
@@ -50,6 +49,8 @@ class BatchProcessingThread(QThread):
                 except Exception as e:
                     self.error.emit(os.path.basename(file_path), str(e))
                     traceback.print_exc()
+                
+                self.progress.emit(i + 1, total)
             
             self.finished.emit()
             
@@ -116,15 +117,36 @@ class BatchProcessingThread(QThread):
             # Ensure output directory exists
             os.makedirs(self.output_dir, exist_ok=True)
             
-            # Save with appropriate format
+            # Save with appropriate format (PIL expects uppercase format names)
             save_kwargs = {}
-            if output_format in ['jpg', 'jpeg']:
-                save_kwargs['quality'] = 95
-                save_kwargs['optimize'] = True
-            elif output_format == 'png':
-                save_kwargs['optimize'] = True
-                save_kwargs['compress_level'] = 6
-            
+            if output_format:
+                fmt_upper = output_format.upper()
+                if fmt_upper in ['JPG', 'JPEG']:
+                    if img.mode == 'RGBA':
+                        img = img.convert('RGB')
+                    save_kwargs['format'] = 'JPEG'
+                    save_kwargs['quality'] = 95
+                    save_kwargs['optimize'] = True
+                elif fmt_upper == 'PNG':
+                    save_kwargs['format'] = 'PNG'
+                    save_kwargs['optimize'] = True
+                    save_kwargs['compress_level'] = 6
+                elif fmt_upper in ['WEBP', 'TIFF', 'BMP', 'GIF']:
+                    save_kwargs['format'] = fmt_upper
+                    if fmt_upper == 'WEBP':
+                        save_kwargs['quality'] = 95
+            else:
+                # Infer from extension when no format conversion
+                ext = os.path.splitext(output_path)[1].lower()
+                fmt_map = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.bmp': 'BMP',
+                           '.tiff': 'TIFF', '.webp': 'WEBP', '.gif': 'GIF'}
+                save_kwargs['format'] = fmt_map.get(ext, 'PNG')
+                if save_kwargs['format'] == 'JPEG' and img.mode == 'RGBA':
+                    img = img.convert('RGB')
+                if save_kwargs['format'] == 'JPEG':
+                    save_kwargs['quality'] = 95
+                    save_kwargs['optimize'] = True
+
             img.save(output_path, **save_kwargs)
             
         except Exception as e:

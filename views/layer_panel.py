@@ -99,6 +99,8 @@ class LayerPanel(QWidget):
     layer_selected = pyqtSignal(int)
     layer_added = pyqtSignal()
     layer_removed = pyqtSignal(int)
+    layer_duplicate_requested = pyqtSignal(int)
+    layer_renamed = pyqtSignal(int, str)
     layer_moved = pyqtSignal(int, int)
     layer_merged = pyqtSignal(list)
     layer_flattened = pyqtSignal()
@@ -186,7 +188,7 @@ class LayerPanel(QWidget):
         """Duplicate selected layer"""
         current_row = self.layer_list.currentRow()
         if current_row >= 0:
-            self.layer_added.emit()  # Will be handled by controller
+            self.layer_duplicate_requested.emit(current_row)
     
     def merge_layers(self):
         """Merge selected layers"""
@@ -255,10 +257,11 @@ class LayerPanel(QWidget):
         self.layer_blend_changed.emit(index, mode)
     
     def update_layer_name(self):
-        """Update layer name"""
+        """Update layer name and notify controller"""
         if self.current_layer >= 0:
-            new_name = self.name_edit.text()
+            new_name = self.name_edit.text().strip()
             if new_name:
                 self.layers[self.current_layer] = new_name
                 widget = self.layer_widgets[self.current_layer]
                 widget.name_label.setText(new_name)
+                self.layer_renamed.emit(self.current_layer, new_name)

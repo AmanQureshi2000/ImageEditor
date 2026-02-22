@@ -114,10 +114,9 @@ class LayerManager:
         base_index = indices[-1]
         base_layer = self.layers[base_index]
         
-        # Composite all layers onto base
+        # Composite all layers onto base (bottom to top: composite in ascending index order)
         result_image = base_layer.image.copy()
-        
-        for idx in indices[:-1]:  # Skip the base
+        for idx in reversed(indices[:-1]):  # Skip the base, composite lower indices first
             layer = self.layers[idx]
             if layer.visible:
                 result_image = self._blend_images(
@@ -130,9 +129,12 @@ class LayerManager:
         # Create merged layer
         merged_layer = Layer(result_image, "Merged Layer")
         
-        # Remove merged layers
+        # Remove merged layers (highest index first to avoid index shift)
         for idx in indices:
             self.remove_layer(idx)
+        
+        # Insert the merged layer at the position of the bottom-most merged layer
+        self.add_layer(merged_layer, base_index)
         
         return merged_layer
     
@@ -141,15 +143,23 @@ class LayerManager:
         if not self.layers:
             return None
         
-        # Start with bottom layer
-        result = self.layers[0].image.copy()
+        # Get canvas size
+        w, h = self.width or self.layers[0].image.width, self.height or self.layers[0].image.height
+        if w <= 0 or h <= 0:
+            w, h = self.layers[0].image.size
         
-        # Composite all layers
-        for layer in self.layers[1:]:
+        # Start with transparent/white base so first layer's opacity and blend are applied
+        result = Image.new('RGBA', (w, h), (255, 255, 255, 255))
+        
+        # Composite all visible layers (bottom to top)
+        for layer in self.layers:
             if layer.visible:
+                top_img = layer.image
+                if top_img.mode != 'RGBA':
+                    top_img = top_img.convert('RGBA')
                 result = self._blend_images(
                     result,
-                    layer.image,
+                    top_img,
                     layer.blend_mode,
                     layer.opacity
                 )

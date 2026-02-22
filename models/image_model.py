@@ -1,5 +1,5 @@
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter, ExifTags
+from PIL import Image, ImageEnhance, ImageFilter, ExifTags, ImageOps
 import cv2
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
@@ -88,8 +88,8 @@ class ImageModel:
         return buffer.getvalue()
     
     def _decompress_image(self, data: bytes) -> Image.Image:
-        """Decompress image from history storage"""
-        return Image.open(io.BytesIO(data))
+        """Decompress image from history storage (returns a full copy to avoid lazy-load issues)"""
+        return Image.open(io.BytesIO(data)).copy()
     
     def _create_thumbnail(self, image: Image.Image) -> Image.Image:
         """Create thumbnail for history display"""
@@ -189,12 +189,17 @@ class ImageModel:
                 # This should be handled by UI, but we'll warn
                 warnings.warn(f"File already exists: {filepath}")
             
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+            # Ensure directory exists (skip if filepath has no directory)
+            dirpath = os.path.dirname(os.path.abspath(filepath))
+            if dirpath:
+                os.makedirs(dirpath, exist_ok=True)
             
             # Save with appropriate parameters
             save_kwargs = {}
+            img_to_save = self.current_image
             if format and format.upper() in ['JPEG', 'JPG']:
+                if img_to_save.mode == 'RGBA':
+                    img_to_save = img_to_save.convert('RGB')
                 save_kwargs['quality'] = max(1, min(100, quality))
                 save_kwargs['optimize'] = True
                 save_kwargs['progressive'] = True
@@ -205,7 +210,17 @@ class ImageModel:
                 save_kwargs['quality'] = max(1, min(100, quality))
                 save_kwargs['method'] = 6  # Slower but better compression
             
-            self.current_image.save(filepath, format=format, **save_kwargs)
+            # Infer format from extension if not specified
+            save_format = format
+            if not save_format:
+                ext = os.path.splitext(filepath)[1].lower()
+                fmt_map = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.bmp': 'BMP',
+                           '.tiff': 'TIFF', '.webp': 'WEBP', '.gif': 'GIF'}
+                save_format = fmt_map.get(ext, 'PNG')
+                if save_format == 'JPEG' and img_to_save.mode == 'RGBA':
+                    img_to_save = img_to_save.convert('RGB')
+            
+            img_to_save.save(filepath, format=save_format, **save_kwargs)
             
             # Verify save was successful
             if not os.path.exists(filepath):
@@ -253,17 +268,20 @@ class ImageModel:
             try:
                 exif = self.original_image._getexif()
                 if exif:
-                    for orientation in ExifTags.TAGS.keys():
-                        if ExifTags.TAGS[orientation] == 'Orientation':
+                    orientation_tag_id = None
+                    for tag_id, tag_name in ExifTags.TAGS.items():
+                        if tag_name == 'Orientation':
+                            orientation_tag_id = tag_id
                             break
-                    
-                    if exif.get(orientation) == 3:
-                        self.original_image = self.original_image.rotate(180, expand=True)
-                    elif exif.get(orientation) == 6:
-                        self.original_image = self.original_image.rotate(270, expand=True)
-                    elif exif.get(orientation) == 8:
-                        self.original_image = self.original_image.rotate(90, expand=True)
-            except:
+                    if orientation_tag_id is not None:
+                        orientation = exif.get(orientation_tag_id)
+                        if orientation == 3:
+                            self.original_image = self.original_image.rotate(180, expand=True)
+                        elif orientation == 6:
+                            self.original_image = self.original_image.rotate(270, expand=True)
+                        elif orientation == 8:
+                            self.original_image = self.original_image.rotate(90, expand=True)
+            except Exception:
                 warnings.warn("Could not read EXIF orientation data")
             
             # Convert to RGB for consistency
@@ -292,7 +310,7 @@ class ImageModel:
                     for tag_id, value in exif.items():
                         tag = ExifTags.TAGS.get(tag_id, tag_id)
                         exif_data[tag] = str(value)
-            except:
+            except Exception:
                 exif_data = None
             
             # Get image info
@@ -329,8 +347,23 @@ class ImageModel:
             # Decompress from history
             compressed = self.history_data[self.current_history_index]
             self.current_image = self._decompress_image(compressed)
+            self._sync_image_data_from_current()
         else:
             warnings.warn("Cannot undo: at beginning of history")
+
+    def _sync_image_data_from_current(self):
+        """Update image_data dimensions from current_image after undo/redo."""
+        if self.image_data and self.current_image:
+            self.image_data = ImageData(
+                path=self.image_data.path,
+                name=self.image_data.name,
+                width=self.current_image.width,
+                height=self.current_image.height,
+                mode=self.current_image.mode,
+                format=self.image_data.format,
+                size=self.image_data.size,
+                exif_data=self.image_data.exif_data,
+            )
     
     def redo(self):
         """Redo last undone operation with optimized loading"""
@@ -339,6 +372,7 @@ class ImageModel:
             # Decompress from history
             compressed = self.history_data[self.current_history_index]
             self.current_image = self._decompress_image(compressed)
+            self._sync_image_data_from_current()
         else:
             warnings.warn("Cannot redo: at end of history")
     
@@ -387,6 +421,30 @@ class ImageModel:
         except Exception as e:
             print(f"Error converting to CV2 image: {e}")
             return None
+    
+    def get_cv2_image(self) -> Optional[np.ndarray]:
+        """Get current image as OpenCV BGR array (used by AI controllers)."""
+        return self.get_cv2_image_cached()
+    
+    def update_from_cv2(self, cv2_image: np.ndarray):
+        """Update current image from OpenCV BGR/BGRA array after AI processing."""
+        if cv2_image is None:
+            return
+        try:
+            if len(cv2_image.shape) == 3 and cv2_image.shape[2] == 4:
+                pil_image = Image.fromarray(
+                    cv2.cvtColor(cv2_image, cv2.COLOR_BGRA2RGBA)
+                )
+            else:
+                pil_image = Image.fromarray(
+                    cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
+                )
+            self._processing = True
+            self.current_image = pil_image
+            self._cache.clear()
+            self._add_to_history()
+        finally:
+            self._processing = False
     
     # Existing methods with performance optimizations
     def adjust_brightness(self, factor: float):
@@ -496,6 +554,21 @@ class ImageModel:
             self._processing = False
             raise ImageProcessingError(f"Crop failed: {str(e)}")
     
+    def resize(self, width: int, height: int):
+        """Resize image to given dimensions."""
+        try:
+            if self.current_image:
+                self._processing = True
+                self.current_image = self.current_image.resize(
+                    (width, height), Image.Resampling.LANCZOS
+                )
+                self._add_to_history()
+                self._cache.clear()
+                self._processing = False
+        except Exception as e:
+            self._processing = False
+            raise ImageProcessingError(f"Resize failed: {str(e)}")
+    
     def reset_to_original(self):
         """Reset to original image"""
         if self.original_image:
@@ -504,3 +577,45 @@ class ImageModel:
             self._add_to_history()
             self._cache.clear()
             self._processing = False
+
+    def apply_edge_enhance(self):
+        """Apply edge enhancement filter"""
+        try:
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            self._processing = True
+            self.current_image = self.current_image.filter(ImageFilter.EDGE_ENHANCE_MORE)
+            self._add_to_history()
+            self._cache.clear()
+            self._processing = False
+        except Exception as e:
+            self._processing = False
+            raise ImageProcessingError(f"Edge enhance failed: {str(e)}")
+
+    def flip_horizontal(self):
+        """Flip image horizontally"""
+        try:
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            self._processing = True
+            self.current_image = ImageOps.mirror(self.current_image)
+            self._add_to_history()
+            self._cache.clear()
+            self._processing = False
+        except Exception as e:
+            self._processing = False
+            raise ImageProcessingError(f"Flip horizontal failed: {str(e)}")
+
+    def flip_vertical(self):
+        """Flip image vertically"""
+        try:
+            if self.current_image is None:
+                raise ImageProcessingError("No image loaded")
+            self._processing = True
+            self.current_image = ImageOps.flip(self.current_image)
+            self._add_to_history()
+            self._cache.clear()
+            self._processing = False
+        except Exception as e:
+            self._processing = False
+            raise ImageProcessingError(f"Flip vertical failed: {str(e)}")

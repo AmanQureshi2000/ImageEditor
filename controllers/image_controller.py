@@ -57,14 +57,19 @@ class ImageController(QObject):
                 image_q = ImageQt.ImageQt(self.image_model.current_image)
                 qimage = QImage(image_q)
                 return QPixmap.fromImage(qimage)
-            except AttributeError:
-                # Method 2: Alternative conversion
-                img_data = self.image_model.current_image.tobytes("raw", "RGB")
-                qimage = QImage(img_data, 
-                              self.image_model.current_image.width,
-                              self.image_model.current_image.height,
-                              self.image_model.current_image.width * 3,
-                              QImage.Format_RGB888)
+            except (AttributeError, TypeError):
+                # Method 2: Alternative conversion (handle RGB and RGBA)
+                img = self.image_model.current_image
+                if img.mode == 'RGBA':
+                    img_data = img.tobytes("raw", "RGBA")
+                    qimage = QImage(img_data, img.width, img.height,
+                                    img.width * 4, QImage.Format_RGBA8888)
+                else:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    img_data = img.tobytes("raw", "RGB")
+                    qimage = QImage(img_data, img.width, img.height,
+                                    img.width * 3, QImage.Format_RGB888)
                 return QPixmap.fromImage(qimage)
             except Exception:
                 # Method 3: Bytes IO fallback
@@ -157,15 +162,6 @@ class ImageController(QObject):
             self.image_model.flip_vertical()
             self.image_updated.emit()
             self.status_updated.emit("Flipped vertically")
-        except Exception as e:
-            self.status_updated.emit(f"Error: {str(e)}")
-        
-    def reset_image(self):
-        """Reset to original image"""
-        try:
-            self.image_model.reset_to_original()
-            self.image_updated.emit()
-            self.status_updated.emit("Reset to original")
         except Exception as e:
             self.status_updated.emit(f"Error: {str(e)}")
         
@@ -289,6 +285,23 @@ class ImageController(QObject):
             self.status_updated.emit(f"Error: {str(e)}")
             self.progress_updated.emit(100)
 
+    def ai_colorize(self):
+        """Colorize black and white image using AI/model color maps"""
+        try:
+            self.progress_updated.emit(10)
+            cv2_image = self.image_model.get_cv2_image()
+            if cv2_image is not None:
+                self.progress_updated.emit(40)
+                colored = self.ai_model.colorize_image(cv2_image)
+                self.progress_updated.emit(80)
+                self.image_model.update_from_cv2(colored)
+                self.image_updated.emit()
+                self.status_updated.emit("Image colorized")
+            self.progress_updated.emit(100)
+        except Exception as e:
+            self.status_updated.emit(f"Error: {str(e)}")
+            self.progress_updated.emit(100)
+
     def reset_image(self):
         """Reset to original image"""
         try:
@@ -300,6 +313,7 @@ class ImageController(QObject):
                 # Fallback method
                 if self.image_model.original_image:
                     self.image_model.current_image = self.image_model.original_image.copy()
+                    self.image_model._cache.clear()
                     self.image_model._add_to_history()
                     self.image_updated.emit()
                     self.status_updated.emit("Reset to original")
@@ -310,6 +324,9 @@ class ImageController(QObject):
         """Toggle layer mode on/off"""
         self.use_layers = enabled
         if enabled and self.image_model.current_image:
+            # Clear any existing layers so we don't stack duplicates when re-enabling
+            self.layer_manager.layers.clear()
+            self.layer_manager.active_layer_index = -1
             # Create base layer from current image
             layer = Layer(self.image_model.current_image, "Background")
             self.layer_manager.add_layer(layer)
@@ -389,6 +406,11 @@ class ImageController(QObject):
             self.layer_manager.layers[index].visible = visible
             self._update_from_layers()
 
+    def set_layer_name(self, index: int, name: str):
+        """Set layer name"""
+        if self.use_layers and 0 <= index < len(self.layer_manager.layers) and name:
+            self.layer_manager.layers[index].name = name
+
     def _update_from_layers(self):
         """Update current image from layers"""
         if self.use_layers:
@@ -424,37 +446,49 @@ class ImageController(QObject):
         """Adjust image hue"""
         if self.image_model.current_image:
             try:
-                # Convert to numpy array for processing
-                img_array = np.array(self.image_model.current_image)
-                
-                # Convert to HSV
-                if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                    hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
-                    # Adjust hue
-                    hsv[:, :, 0] = (hsv[:, :, 0] + value) % 180
-                    # Convert back to RGB
-                    rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-                    self.image_model.current_image = Image.fromarray(rgb)
-                    self.image_model._add_to_history()
-                    self.image_updated.emit()
-                    self.status_updated.emit(f"Hue adjusted: {value}")
+                img = self.image_model.current_image
+                img_array = np.array(img)
+                if len(img_array.shape) != 3:
+                    return
+                # Use RGB portion for HSV (handle RGBA)
+                rgb = img_array[:, :, :3] if img_array.shape[2] == 4 else img_array
+                hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+                hsv[:, :, 0] = (hsv[:, :, 0] + value) % 180
+                rgb_out = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                if img_array.shape[2] == 4:
+                    out = np.dstack((rgb_out, img_array[:, :, 3]))
+                else:
+                    out = rgb_out
+                self.image_model._processing = True
+                self.image_model.current_image = Image.fromarray(out)
+                self.image_model._add_to_history()
+                self.image_model._cache.clear()
+                self.image_model._processing = False
+                self.image_updated.emit()
+                self.status_updated.emit(f"Hue adjusted: {value}")
             except Exception as e:
+                if hasattr(self.image_model, '_processing'):
+                    self.image_model._processing = False
                 self.status_updated.emit(f"Error adjusting hue: {str(e)}")
 
     def adjust_gamma(self, value: float):
         """Adjust image gamma"""
         if self.image_model.current_image:
             try:
-                # Convert to numpy array
-                img_array = np.array(self.image_model.current_image).astype(np.float32) / 255.0
-                
-                # Apply gamma correction
+                img = self.image_model.current_image
+                img_array = np.array(img).astype(np.float32) / 255.0
+                if value <= 0:
+                    value = 1.0
                 gamma_corrected = np.power(img_array, 1.0 / value)
-                gamma_corrected = (gamma_corrected * 255).astype(np.uint8)
-                
+                gamma_corrected = (np.clip(gamma_corrected, 0, 1) * 255).astype(np.uint8)
+                self.image_model._processing = True
                 self.image_model.current_image = Image.fromarray(gamma_corrected)
                 self.image_model._add_to_history()
+                self.image_model._cache.clear()
+                self.image_model._processing = False
                 self.image_updated.emit()
                 self.status_updated.emit(f"Gamma adjusted: {value:.2f}")
             except Exception as e:
+                if hasattr(self.image_model, '_processing'):
+                    self.image_model._processing = False
                 self.status_updated.emit(f"Error adjusting gamma: {str(e)}")

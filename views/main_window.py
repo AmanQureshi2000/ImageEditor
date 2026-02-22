@@ -53,7 +53,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller = ImageController()
         self.ai_controller = None
-        self.batch_controller = None
+        self.batch_controller = BatchController()
         self.crop_tool = None
         self.comparison_view = None
         self.export_dialog = None
@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.connect_signals()
+        self.connect_batch_signals()
         self.init_ai_controller()
         self.load_initial_data()
         
@@ -614,6 +615,8 @@ class MainWindow(QMainWindow):
         self.layer_panel.layer_selected.connect(self.on_layer_selected)
         self.layer_panel.layer_added.connect(self.on_layer_added)
         self.layer_panel.layer_removed.connect(self.on_layer_removed)
+        self.layer_panel.layer_duplicate_requested.connect(self.on_layer_duplicate_requested)
+        self.layer_panel.layer_renamed.connect(self.on_layer_renamed)
         self.layer_panel.layer_merged.connect(self.on_layers_merged)
         self.layer_panel.layer_flattened.connect(self.on_layers_flattened)
         self.layer_panel.layer_opacity_changed.connect(self.on_layer_opacity_changed)
@@ -1115,8 +1118,10 @@ class MainWindow(QMainWindow):
             self.open_image(filepath)
         else:
             QMessageBox.warning(self, "File Not Found", f"The file '{filepath}' no longer exists.")
-            self.recent_files.remove(filepath)
-            self.update_recent_files_menu()
+            if filepath in self.recent_files:
+                self.recent_files.remove(filepath)
+                self.workspace_manager.save_recent_files(self.recent_files)
+                self.update_recent_files_menu()
 
     def customize_shortcuts(self):
         """Open shortcut customization dialog"""
@@ -1125,19 +1130,42 @@ class MainWindow(QMainWindow):
             # Reapply shortcuts to all actions
             self.apply_shortcuts()
 
+    # Map action object names (with _action stripped or toolbar_ prefix) to shortcut manager keys
+    ACTION_SHORTCUT_IDS = {
+        'open': 'file_open', 'save': 'file_save', 'save_as': 'file_save_as',
+        'export': 'file_export', 'exit': 'file_exit',
+        'undo': 'edit_undo', 'redo': 'edit_redo', 'reset': 'edit_reset',
+        'crop': 'image_crop', 'resize': 'image_resize',
+        'rotate_90': 'image_rotate_right', 'rotate_270': 'image_rotate_left',
+        'flip_h': 'image_flip_h', 'flip_v': 'image_flip_v',
+        'blur': None, 'edge': None,
+        'denoise': 'ai_denoise', 'auto_enhance': 'ai_auto_enhance',
+        'super_res': 'ai_super_res', 'remove_bg': 'ai_remove_bg',
+        'facial': 'ai_facial', 'colorize': None,
+        'compare': 'view_compare', 'zoom_in': 'view_zoom_in', 'zoom_out': 'view_zoom_out',
+        'fit': 'view_fit', 'actual': 'view_actual',
+        'new_layer': 'layer_new', 'duplicate_layer': 'layer_duplicate',
+        'delete_layer': 'layer_delete', 'merge_down': 'layer_merge',
+        'flatten': 'layer_flatten', 'about': 'help_about',
+    }
+
     def apply_shortcuts(self):
         """Apply keyboard shortcuts to all actions"""
-        # Update all action shortcuts
+        if not hasattr(self.shortcut_manager, 'get_shortcut'):
+            return
         for action in self.findChildren(QAction):
-            if action.objectName():
-                # Extract action ID from object name
-                action_id = action.objectName().replace('_action', '')
-                if hasattr(self.shortcut_manager, 'get_shortcut'):
-                    shortcut = self.shortcut_manager.get_shortcut(action_id)
+            oname = action.objectName()
+            if not oname:
+                continue
+            action_key = oname.replace('_action', '').replace('toolbar_', '')
+            shortcut_id = self.ACTION_SHORTCUT_IDS.get(action_key)
+            if shortcut_id:
+                try:
+                    shortcut = self.shortcut_manager.get_shortcut(shortcut_id)
                     if shortcut:
                         action.setShortcut(shortcut)
-        
-        # Update tooltips
+                except (KeyError, TypeError):
+                    pass
         self.tooltip_manager.setup_tooltips(self)
 
     def switch_theme(self, theme_name):
@@ -1362,12 +1390,21 @@ class MainWindow(QMainWindow):
         self.controller.image_updated.connect(self.update_image_display)
         self.controller.status_updated.connect(self.update_status)
         self.controller.progress_updated.connect(self.update_progress)
+
+    def connect_batch_signals(self):
+        """Connect batch controller signals (once at init)"""
+        self.batch_controller.batch_started.connect(self.on_batch_started)
+        self.batch_controller.batch_progress.connect(self.on_batch_progress)
+        self.batch_controller.batch_file_completed.connect(self.on_batch_file_completed)
+        self.batch_controller.batch_error.connect(self.on_batch_error)
+        self.batch_controller.batch_finished.connect(self.on_batch_finished)
+        self.batch_controller.batch_status.connect(self.update_status)
         
     # ========== Image Operations ==========
     
     def open_image(self, filepath=None):
-        """Open image file dialog"""
-        if not filepath:
+        """Open image file dialog (filepath may be None or a path string; ignore boolean from QAction.triggered)"""
+        if not filepath or not isinstance(filepath, str):
             filepath, _ = QFileDialog.getOpenFileName(
                 self,
                 "Open Image",
@@ -1376,7 +1413,7 @@ class MainWindow(QMainWindow):
                 "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp);;All Files (*.*)"
             )
         
-        if filepath:
+        if filepath and isinstance(filepath, str):
             try:
                 self.controller.load_image(filepath)
                 self.save_btn.setEnabled(True)
@@ -1474,13 +1511,11 @@ class MainWindow(QMainWindow):
         
     def adjust_hue(self, value: int):
         """Handle hue adjustment"""
-        # This would need to be implemented in the controller
-        self.update_status(f"Hue adjusted: {value}")
+        self.controller.adjust_hue(value)
         
     def adjust_gamma(self, value: float):
         """Handle gamma adjustment"""
-        # This would need to be implemented in the controller
-        self.update_status(f"Gamma adjusted: {value}")
+        self.controller.adjust_gamma(value)
         
     # ========== Transform Methods ==========
     
@@ -1530,10 +1565,11 @@ class MainWindow(QMainWindow):
         self.controller.ai_style_transfer(style)
         
     def colorize_image(self):
-        """Apply colorization"""
-        self.update_status("Colorizing image...")
-        # This would need to be implemented in the controller
-        QMessageBox.information(self, "Coming Soon", "Colorization feature will be available in the next update!")
+        """Apply colorization to black and white image"""
+        if not self.controller.image_model.current_image:
+            QMessageBox.warning(self, "Colorize", "Please open an image first.")
+            return
+        self.controller.ai_colorize()
         
     # ========== Crop Tool ==========
     
@@ -1603,7 +1639,10 @@ class MainWindow(QMainWindow):
         """Export image with specified options"""
         try:
             img = self.controller.image_model.current_image
-            
+            if img is None:
+                QMessageBox.warning(self, "Export", "No image to export.")
+                return
+
             # Apply size adjustments
             if 'scale' in options:
                 new_size = (int(img.width * options['scale']), 
@@ -1613,20 +1652,31 @@ class MainWindow(QMainWindow):
                 img = img.resize((options['width'], options['height']), 
                                Image.Resampling.LANCZOS)
             
-            # Save with format-specific options
-            format = options['format'].lower()
+            # Save with format-specific options (PIL expects uppercase: JPEG, PNG, etc.)
+            format_key = options['format'].upper()
+            if format_key == 'JPG':
+                format_key = 'JPEG'
             save_kwargs = {}
             
-            if format in ['jpeg', 'jpg'] and options.get('quality'):
-                save_kwargs['quality'] = options['quality']
+            if format_key == 'JPEG':
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+                if options.get('quality'):
+                    save_kwargs['quality'] = options['quality']
                 save_kwargs['optimize'] = True
+            elif format_key == 'PNG':
+                save_kwargs['optimize'] = True
+                save_kwargs['compress_level'] = 6
+            elif format_key == 'WEBP' and options.get('quality'):
+                save_kwargs['quality'] = options['quality']
             
             if options.get('strip_metadata'):
-                # Create new image without metadata
+                # Create new image without metadata (use resized img pixel data)
+                pixel_data = list(img.getdata())
                 img = Image.new(img.mode, img.size)
-                img.putdata(list(self.controller.image_model.current_image.getdata()))
+                img.putdata(pixel_data)
             
-            img.save(filepath, format=format, **save_kwargs)
+            img.save(filepath, format=format_key, **save_kwargs)
             
             self.controller.status_updated.emit(f"Image exported to {filepath}")
             
@@ -1802,20 +1852,15 @@ class MainWindow(QMainWindow):
         
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setObjectName("batch_cancel_btn")
-        cancel_btn.clicked.connect(self.batch_dialog.reject)
+        def on_batch_cancel():
+            if self.batch_controller and self.batch_controller.is_processing:
+                self.batch_controller.cancel_batch()
+            self.batch_dialog.reject()
+        cancel_btn.clicked.connect(on_batch_cancel)
         cancel_btn.setStyleSheet("background-color: #f44336; color: white; padding: 5px;")
         btn_layout.addWidget(cancel_btn)
         
         layout.addLayout(btn_layout)
-        
-        # Initialize batch controller
-        self.batch_controller = BatchController()
-        self.batch_controller.batch_started.connect(self.on_batch_started)
-        self.batch_controller.batch_progress.connect(self.on_batch_progress)
-        self.batch_controller.batch_file_completed.connect(self.on_batch_file_completed)
-        self.batch_controller.batch_error.connect(self.on_batch_error)
-        self.batch_controller.batch_finished.connect(self.on_batch_finished)
-        self.batch_controller.batch_status.connect(self.update_status)
         
         self.batch_dialog.exec_()
 
@@ -1886,9 +1931,8 @@ class MainWindow(QMainWindow):
         if not operations:
             operations.append(('copy', {}))  # Just copy without changes
         
-        # Start processing
+        # Start processing (keep dialog open to show progress)
         self.batch_controller.process_batch(files, output_dir, operations)
-        dialog.accept()
 
     def on_batch_started(self):
         """Handle batch processing start"""
@@ -1922,6 +1966,9 @@ class MainWindow(QMainWindow):
                 pass
         self.update_status("Batch processing completed")
         QMessageBox.information(self, "Batch Complete", "All files have been processed successfully!")
+        # Close batch dialog if it is still open
+        if hasattr(self, 'batch_dialog') and self.batch_dialog and self.batch_dialog.isVisible():
+            self.batch_dialog.accept()
 
     # ========== Layer Methods ==========
     
@@ -1948,7 +1995,16 @@ class MainWindow(QMainWindow):
         """Handle remove layer request"""
         self.controller.remove_layer(index)
         self.update_layer_panel()
-    
+
+    def on_layer_duplicate_requested(self, index):
+        """Handle duplicate layer request from panel"""
+        self.controller.duplicate_layer(index)
+        self.update_layer_panel()
+
+    def on_layer_renamed(self, index, name):
+        """Handle layer rename from panel"""
+        self.controller.set_layer_name(index, name)
+
     def duplicate_current_layer(self):
         """Duplicate the current layer"""
         if hasattr(self.controller, 'layer_manager') and self.controller.layer_manager.get_active_layer():
@@ -2091,7 +2147,7 @@ class MainWindow(QMainWindow):
             self.controller.image_updated.disconnect()
             self.controller.status_updated.disconnect()
             self.controller.progress_updated.disconnect()
-        except:
+        except (TypeError, RuntimeError):
             pass
         
         # Check if processing is ongoing

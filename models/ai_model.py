@@ -418,7 +418,7 @@ class AIModel:
             
             # Auto color enhancement
             result = self._enhance_colors(result)
-            
+            self.cache.cache_processed(image_id, 'auto_enhance', {}, result)
             return result
             
         except Exception as e:
